@@ -1,0 +1,273 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1419;
+  --bg-elevated: #151c24;
+  --bg-hover: #1c2633;
+  --border: #273141;
+  --text: #e8eef5;
+  --muted: #8b9bb0;
+  --accent: #5b9fd4;
+  --accent-hover: #79b4e0;
+  --success: #3d9e6f;
+  --warning: #c9a227;
+  --danger: #c45c5c;
+  --radius: 10px;
+  --font: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { min-height: 100%; margin: 0; }
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(91, 159, 212, 0.12), transparent 55%),
+    radial-gradient(900px 500px at 90% 0%, rgba(61, 158, 111, 0.08), transparent 50%),
+    var(--bg);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
+
+button, input, select, textarea {
+  font: inherit;
+}
+
+.shell {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.brand {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.nav a, .nav button.linkish {
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.nav a:hover, .nav a.active, .nav button.linkish:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.card {
+  background: color-mix(in oklab, var(--bg-elevated) 92%, black);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.card h2, .card h3 { margin: 0 0 0.35rem; }
+.muted { color: var(--muted); font-size: 0.92rem; }
+
+.stack { display: grid; gap: 0.75rem; }
+.row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; }
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  flex: 1;
+}
+
+input, select, textarea {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid color-mix(in oklab, var(--accent) 50%, transparent);
+  border-color: var(--accent);
+}
+
+button, .btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: #081018;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 0.55rem 0.9rem;
+  cursor: pointer;
+}
+button:hover { background: var(--accent-hover); }
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+button.secondary:hover { background: var(--bg-hover); }
+button.danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 50%, var(--border));
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.match-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  font-weight: 400;
+  cursor: pointer;
+}
+.match-card:hover {
+  background: var(--bg-hover) !important;
+  border-color: var(--accent);
+  color: var(--text) !important;
+}
+.match-card strong,
+.match-card .match-title {
+  display: block;
+  color: var(--text) !important;
+  font-weight: 700;
+  margin-bottom: 0.2rem;
+}
+.match-card .match-subtitle {
+  color: var(--muted) !important;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+}
+.match-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  background: var(--bg-elevated);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: lowercase;
+  background: var(--bg-hover);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.badge.downloading, .badge.queued, .badge.copying { color: var(--accent); }
+.badge.imported, .badge.completed { color: var(--success); }
+.badge.error, .badge.awaiting_match { color: var(--warning); }
+
+.progress {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.progress > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--success));
+}
+
+.download-grid {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.download-item {
+  display: grid;
+  grid-template-columns: 64px 1fr auto;
+  gap: 0.85rem;
+  align-items: center;
+}
+.download-item img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.toast {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  padding: 0.8rem 1rem;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  z-index: 50;
+  max-width: 360px;
+}
+
+.auth-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+.auth-card {
+  width: min(420px, 100%);
+}
+
+.match-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+.match-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: var(--bg);
+  cursor: pointer;
+}
+.match-card:hover { border-color: var(--accent); }
+.match-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  background: var(--bg-elevated);
+}
+
+@media (max-width: 640px) {
+  .download-item { grid-template-columns: 48px 1fr; }
+  .download-item .actions { grid-column: 1 / -1; }
+}

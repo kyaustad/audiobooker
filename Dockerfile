@@ -1,38 +1,39 @@
-FROM node:22-bookworm-slim AS base
+# --- Frontend ---
+FROM node:22-bookworm-slim AS frontend
 RUN corepack enable
-
-FROM base AS deps
-WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+WORKDIR /frontend
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
-
-FROM base AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
+COPY frontend/ ./
 RUN pnpm build
 
-FROM base AS runner
+# --- Backend ---
+FROM rust:1.96-bookworm AS backend
 WORKDIR /app
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
+COPY backend/Cargo.toml backend/Cargo.lock ./
+COPY backend/migrations ./migrations
+COPY backend/src ./src
+RUN mkdir -p static \
+  && cargo build --release \
+  && strip target/release/audiobooker
 
+# --- Runtime ---
+FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ \
+  && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile --prod
-
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+WORKDIR /app
+COPY --from=backend /app/target/release/audiobooker /app/audiobooker
+COPY --from=frontend /frontend/dist /app/static
 
 RUN mkdir -p /data /downloads /audiobooks
 
-EXPOSE 3000
+ENV HOST=0.0.0.0
 ENV PORT=3000
-ENV HOSTNAME=0.0.0.0
+ENV DATABASE_PATH=/data/audiobooker.db
+ENV STATIC_DIR=/app/static
+ENV COOKIE_SECURE=false
 
-CMD ["node", "server.js"]
+EXPOSE 3000
+CMD ["/app/audiobooker"]

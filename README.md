@@ -1,128 +1,173 @@
 # Audiobooker
 
-A self-hosted web app for downloading audiobooks through qBittorrent and copying finished files into your library folder for [Audiobookshelf](https://www.audiobookshelf.org/) (or similar tools) to pick up.
+Low-resource audiobook download manager for [Audiobookshelf](https://www.audiobookshelf.org/), inspired by the *arr suite.
 
-It is designed around a simple workflow:
-
-1. Find an audiobook on **AudiobookBay** (or another indexer) and copy the **info hash**
-2. Paste the hash (or a full magnet link) into Audiobooker
-3. Audiobooker sends the torrent to **qBittorrent** and tracks progress per user
-4. When the download completes, files are **copied** (not moved) into your configured audiobook folder
-
-## Features
-
-- User accounts with SQLite-backed auth
-- Add downloads via magnet link **or** raw 40-character info hash
-- Per-user download history and progress tracking
-- Automatic sync with qBittorrent (progress, speed, ETA)
-- Automatic file copy on completion to your library path
-- Docker-ready for Unraid and other homelab setups
-
-## How it works
+**Stack:** Rust (Axum) backend + Svelte SPA, SQLite, single Docker process.
 
 ```
-AudiobookBay  →  copy info hash  →  Audiobooker  →  qBittorrent  →  copy to library  →  Audiobookshelf
+AudiobookBay → Audiobooker → qBittorrent → copy Author/Series/Book → Audiobookshelf
+                 ↑
+            Audible match (Audnexus)
 ```
 
-Audiobooker does not scrape AudiobookBay. You browse there as usual, grab the hash from a torrent page, and paste it here. If you only have the hash, the app builds a magnet link for you (similar to [hashtomagnet.com](https://hashtomagnet.com)).
+## Workflow
 
-Each user only sees their own downloads. A background job polls qBittorrent every few seconds and updates the database. When a torrent reaches 100%, the app copies the content from the qBittorrent download path to `AUDIOBOOK_DEST_PATH`.
+1. First boot → create **root** admin (optional qBittorrent test)
+2. Root configures **qBittorrent** + library paths in **Settings**
+3. Root creates **users** (temporary passwords)
+4. Users add magnets/hashes (or browse AudiobookBay), **match Audible metadata**, then download
+5. On completion, files are **copied** into `Author/Series/Title` for Audiobookshelf
+6. Optional PWA push when a book is imported
 
-## Quick start (Docker)
+## Docker (recommended)
 
-### 1. Configure environment
+Published image (after CI runs on `main`):
 
 ```bash
+docker pull ghcr.io/kyaustad/audiobooker:latest
+```
+
+Package page: [ghcr.io/kyaustad/audiobooker](https://github.com/kyaustad/audiobooker/pkgs/container/audiobooker)
+
+### docker compose
+
+```bash
+git clone https://github.com/kyaustad/audiobooker.git
+cd audiobooker
 cp .env.example .env
+# Edit host paths in .env (see below)
+docker compose up -d
 ```
 
-Edit `.env` with your values:
+Or pull the published image without building:
 
-| Variable | Description |
-|----------|-------------|
-| `SESSION_SECRET` | Long random string for session encryption |
-| `QBITTORRENT_URL` | qBittorrent Web UI URL (e.g. `http://qbittorrent:8080`) |
-| `QBITTORRENT_USERNAME` | qBittorrent Web UI username |
-| `QBITTORRENT_PASSWORD` | qBittorrent Web UI password |
-| `TORRENT_DOWNLOADS_PATH` | Host path where qBittorrent saves files |
-| `AUDIOBOOK_LIBRARY_PATH` | Host path for your Audiobookshelf library |
-
-### 2. Start the container
-
-```bash
-docker compose up -d --build
+```yaml
+# swap `build: .` for:
+image: ghcr.io/kyaustad/audiobooker:latest
 ```
 
-Open **http://your-server:3000**, register an account, and start adding downloads.
+Open `http://server:3000`, complete root setup, then finish qBittorrent + paths under **Settings**.
 
-### 3. Path alignment (important)
+### Volumes
 
-The app container must see the same filesystem paths that qBittorrent reports. By default:
+| Container path | Purpose | Host tip (Unraid) |
+|----------------|---------|-------------------|
+| `/data` | SQLite DB + app state | e.g. `/mnt/user/appdata/audiobooker` |
+| `/downloads` | Completed torrent files (read-only OK) | Same share qBittorrent writes to |
+| `/audiobooks` | Library root Audiobookshelf reads | Your ABS library share |
 
-- qBittorrent downloads → `/downloads` inside the container
-- Audiobook library → `/audiobooks` inside the container
+`docker-compose.yml` defaults:
 
-Map these to the **same host folders** your qBittorrent and Audiobookshelf containers already use. If paths do not match, downloads will complete but the copy step will fail.
+| Env var | Default | Maps to |
+|---------|---------|---------|
+| `TORRENT_DOWNLOADS_PATH` | `/mnt/user/downloads` | → `/downloads` |
+| `AUDIOBOOK_LIBRARY_PATH` | `/mnt/user/audiobooks` | → `/audiobooks` |
+| `HOST_PORT` | `3000` | host port → `3000` |
+| `COOKIE_SECURE` | `false` | set `true` only behind HTTPS |
+| `PUID` / `PGID` | `0` / `0` | optional non-root user |
 
-## Usage
+### Settings paths (important)
 
-### From AudiobookBay
+In the UI, set paths **as the container sees them**, not host paths:
 
-1. Open a torrent page on AudiobookBay
-2. Copy the **info hash** (40-character hex string)
-3. In Audiobooker, paste the hash into **Magnet link or info hash**
-4. Optionally add a **Display name** (helpful before metadata arrives from the swarm)
-5. Click **Add download**
+| Setting | Typical value |
+|---------|----------------|
+| Download path | `/downloads` |
+| Library path | `/audiobooks` |
+| qBittorrent URL | `http://qbittorrent:8080` or LAN IP of the WebUI |
 
-You can also paste a full `magnet:?xt=urn:btih:...` link if you already have one.
+Audiobooker copies from the path qBittorrent reports. If qBit uses a different in-container path (e.g. `/mnt/user/downloads`), set **Download path** to `/downloads` so Audiobooker can remap using the torrent’s save path.
 
-### Tracking downloads
+**Best setup:** mount the same host folder into both containers at the **same** container path (`/downloads`).
 
-The dashboard shows status, progress, speed, and ETA for each of your torrents. Progress refreshes automatically. When a download finishes, status changes to `copied` and the destination path is shown.
+### Permissions
 
-### Removing a download
+- Default: container runs as root (`PUID=0`), which avoids write failures on first boot.
+- On Unraid, Audiobookshelf may not read root-owned imports. Either:
+  - set `PUID=99` and `PGID=100` (common Unraid share ownership), **and** `chown -R 99:100` your `./data` (or appdata) folder before start, or
+  - leave root and run a periodic New Permissions / `chown` on the library share.
+- `/data` must be writable by the container user or the DB cannot be created.
+- `/audiobooks` must be writable or imports fail after download completes.
+- `/downloads` can be `:ro` if you only copy out of it.
 
-Use the trash icon on a row to remove it from qBittorrent and the app. This does not delete files already copied to your library.
+### Unraid (Docker UI)
 
-## Unraid notes
+1. Repository: `ghcr.io/kyaustad/audiobooker:latest`
+2. Port: `3000` → host of your choice
+3. Paths:
+   - `/data` → `appdata/audiobooker`
+   - `/downloads` → your qBittorrent completed folder (**same share**)
+   - `/audiobooks` → Audiobookshelf library
+4. Extra: `COOKIE_SECURE=false` on HTTP LAN; `true` if reverse-proxied with TLS
+5. Optional: `PUID` / `PGID` matching the share
 
-If you already run qBittorrent on Unraid:
+If GHCR asks to log in for a public image, make sure the package visibility is **public** (Actions sets this after the first successful publish; you can also change it under the package settings on GitHub).
 
-- Point `QBITTORRENT_URL` at your existing container (hostname or IP on a shared Docker network)
-- Mount your qBittorrent download folder and audiobook library into the Audiobooker container
-- You do not need the optional qBittorrent service in `docker-compose.yml`
+## Common snags
 
-Example volume mapping on Unraid:
+| Symptom | Likely cause |
+|---------|----------------|
+| Redirected to login forever / session lost | Serving over HTTP with `COOKIE_SECURE=true` — set `false` on plain HTTP |
+| “Source path does not exist” after complete | `/downloads` not mapped to the same files qBit finished, or Settings → Download path wrong |
+| Import permission denied | Library mount not writable by container user (PUID/PGID / root ownership) |
+| qBittorrent connection test fails | Wrong WebUI URL from inside Docker (`localhost` is the Audiobooker container). Use bridge DNS name or host LAN IP; enable WebUI auth if required |
+| Can’t pull from GHCR | Package still private — open the package on GitHub → Package settings → Change visibility → Public |
+| AudiobookBay browse empty / pagination odd | Mirrors/layout change; try a broader query. Narrow searches may only have one page |
 
+## Roles
+
+| Role | Capabilities |
+|------|----------------|
+| **root** | Settings, users, API key (no personal queue) |
+| **user** | Queue, Audible match, ABB browse, password change, PWA notifications |
+
+## API key (*arr-style*)
+
+Root → **API Key** → generate/rotate. Header:
+
+```http
+X-Api-Key: abk_...
 ```
-/mnt/user/data/torrents  →  /downloads   (read-only in Audiobooker)
-/mnt/user/data/audiobooks  →  /audiobooks
-```
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/user` | Create user `{ "username", "password" }` |
+| `GET` | `/api/v1/queue` | All downloads |
+| `GET` | `/api/v1/queue/{username}` | One user’s queue |
+
+## CI / GHCR
+
+Pushing to `main` (or a `v*` tag) runs [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
+
+- Builds the multi-stage Dockerfile
+- Pushes `ghcr.io/<owner>/<repo>:latest` (on default branch), semver tags, and `sha-*`
+- Attaches provenance / SBOM
+- Links the package to this repository and attempts to set visibility to **public**
+
+Manual rebuild: Actions → **Publish Docker image** → Run workflow.
 
 ## Local development
 
-Requirements: Node.js 22+, pnpm
+Requirements: Rust stable, Node 22+, pnpm.
 
 ```bash
+# Terminal 1 — API
+cd backend
+mkdir -p static data
+cargo run
+
+# Terminal 2 — SPA (proxies /api → :3000)
+cd frontend
 pnpm install
-cp .env.example .env
-# Edit .env — for local dev, DATABASE_PATH can be omitted (defaults to data/audiobooker.db)
 pnpm dev
 ```
 
-Visit **http://localhost:3000**.
+## Notes
 
-## Configuration reference
+- Metadata: Audible catalog search + Audnexus enrichment (default `https://api.audnex.us`)
+- AudiobookBay browse (`#/browse`) is a convenience scraper against mirrors (`.lu`, `.fi`); site changes can break parsing
+- Cookies default to non-secure for LAN HTTP
 
-See [`.env.example`](.env.example) for all options. Notable settings:
+## License
 
-- `ALLOW_REGISTRATION=false` — disable new signups after initial setup
-- `ADMIN_USERNAME` / `ADMIN_PASSWORD` — seed an admin account on first startup
-- `SYNC_INTERVAL_MS` — how often to poll qBittorrent (default: 10 seconds)
-
-## Tech stack
-
-- [Next.js](https://nextjs.org/) (App Router)
-- [SQLite](https://www.sqlite.org/) via better-sqlite3
-- [qBittorrent Web API](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-4.1))
-- Docker with standalone Next.js output
+See [LICENSE](LICENSE).
