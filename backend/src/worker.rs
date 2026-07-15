@@ -171,12 +171,23 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
     let public = BookMetadataPublic::from(meta);
     let relative = build_library_relative_path(&settings.path_template, &public);
 
+    let library_root = if let Some(lib_id) = download.library_id {
+        let row: Option<(String,)> = sqlx::query_as("SELECT path FROM libraries WHERE id = ?")
+            .bind(lib_id)
+            .fetch_optional(pool)
+            .await?;
+        row.map(|r| r.0)
+            .unwrap_or_else(|| settings.library_path.clone())
+    } else {
+        settings.library_path.clone()
+    };
+
     let source_path = resolve_download_source(
         download.content_path.as_deref(),
         download.save_path.as_deref(),
         &settings.download_path,
     );
-    match copy_completed(&source_path, Path::new(&settings.library_path), &relative).await {
+    match copy_completed(&source_path, Path::new(&library_root), &relative).await {
         Ok(dest) => {
             sqlx::query(
                 r#"
@@ -197,9 +208,11 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
             let payload = PushPayload {
                 title: "Audiobook imported".into(),
                 body: format!("{} is ready in your library", public.title),
-                url: "/".into(),
+                url: "/#/".into(),
             };
-            let _ = notify_user(pool, settings, download.user_id, &payload).await;
+            if let Err(err) = notify_user(pool, settings, download.user_id, &payload).await {
+                tracing::warn!(error = %err, "push notify failed after import");
+            }
         }
         Err(err) => {
             sqlx::query(
@@ -209,6 +222,18 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
             .bind(download_id)
             .execute(pool)
             .await?;
+
+            let payload = PushPayload {
+                title: "Import failed".into(),
+                body: format!(
+                    "{} could not be copied into your library",
+                    public.title
+                ),
+                url: "/#/".into(),
+            };
+            if let Err(nerr) = notify_user(pool, settings, download.user_id, &payload).await {
+                tracing::warn!(error = %nerr, "push notify failed after import error");
+            }
         }
     }
 

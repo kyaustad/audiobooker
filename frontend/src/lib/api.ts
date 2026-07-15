@@ -3,6 +3,16 @@ export type User = {
   username: string
   role: string
   must_change_password: boolean
+  libraries?: Library[]
+  library_ids?: number[]
+}
+
+export type Library = {
+  id: number
+  name: string
+  path: string
+  abs_id?: string | null
+  created_at?: string
 }
 
 export type Download = {
@@ -17,6 +27,7 @@ export type Download = {
   eta: number
   destination_path: string | null
   error_message: string | null
+  library_id?: number | null
   metadata?: {
     asin: string
     title: string
@@ -77,9 +88,28 @@ export const api = {
       body: JSON.stringify({ current_password, new_password }),
     }),
   listUsers: () => request<{ users: User[] }>('/users'),
-  createUser: (username: string, password: string) =>
-    request('/users', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  createUser: (username: string, password: string, library_ids?: number[]) =>
+    request('/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, library_ids }),
+    }),
+  updateUser: (
+    id: number,
+    body: { password?: string; library_ids?: number[]; must_change_password?: boolean },
+  ) => request(`/users/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteUser: (id: number) => request(`/users/${id}`, { method: 'DELETE' }),
+  listLibraries: () => request<{ libraries: Library[] }>('/libraries'),
+  myLibraries: () => request<{ libraries: Library[] }>('/libraries/mine'),
+  createLibrary: (name: string, path: string) =>
+    request('/libraries', { method: 'POST', body: JSON.stringify({ name, path }) }),
+  updateLibrary: (id: number, name: string, path: string) =>
+    request(`/libraries/${id}`, { method: 'PUT', body: JSON.stringify({ name, path }) }),
+  deleteLibrary: (id: number) => request(`/libraries/${id}`, { method: 'DELETE' }),
+  syncAbsLibraries: (body?: { audiobookshelf_url?: string; audiobookshelf_token?: string }) =>
+    request<{ imported: number; libraries: Library[] }>('/libraries/sync-abs', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    }),
   getSettings: () => request<{ settings: Record<string, unknown> }>('/settings'),
   updateSettings: (body: Record<string, unknown>) =>
     request('/settings', { method: 'PUT', body: JSON.stringify(body) }),
@@ -97,16 +127,17 @@ export const api = {
   rotateApiKey: () =>
     request<{ api_key: string; warning: string }>('/api-key', { method: 'POST' }),
   listDownloads: () => request<{ downloads: Download[] }>('/downloads'),
+  getDownload: (id: number) => request<{ download: Download }>(`/downloads/${id}`),
   createDownload: (input: string, name?: string) =>
     request<{ download: Download }>('/downloads', {
       method: 'POST',
       body: JSON.stringify({ input, name }),
     }),
   deleteDownload: (id: number) => request(`/downloads/${id}`, { method: 'DELETE' }),
-  matchDownload: (id: number, match_data: unknown) =>
+  matchDownload: (id: number, match_data: unknown, library_id?: number) =>
     request(`/downloads/${id}/match`, {
       method: 'POST',
-      body: JSON.stringify({ match_data }),
+      body: JSON.stringify({ match_data, library_id }),
     }),
   searchMetadata: (title: string, author?: string) => {
     const q = new URLSearchParams({ title })
@@ -117,15 +148,47 @@ export const api = {
     request<{ match: unknown }>(`/metadata/asin/${encodeURIComponent(asin)}`),
   abbSearch: (q: string, page = 1) =>
     request<{
-      results: unknown[]
+      results: AbbSearchResult[]
       page: number
       has_more: boolean
       mirror?: string
     }>(`/abb/search?q=${encodeURIComponent(q)}&page=${page}`),
   abbDetails: (url: string) =>
-    request<{ details: { info_hash?: string; magnet_uri?: string; title?: string } }>(
-      `/abb/details?url=${encodeURIComponent(url)}`,
-    ),
+    request<{ details: AbbDetails }>(`/abb/details?url=${encodeURIComponent(url)}`),
+  pushStatus: () => request<{ subscribed: boolean; subscriptions: number }>('/push/status'),
   subscribePush: (subscription: PushSubscriptionJSON) =>
     request('/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) }),
+  unsubscribePush: (endpoint?: string) =>
+    request('/push/unsubscribe', {
+      method: 'POST',
+      body: JSON.stringify({ endpoint }),
+    }),
+}
+
+export type AbbSearchResult = {
+  title: string
+  url: string
+  cover_url?: string | null
+  info?: string | null
+  author?: string | null
+  language?: string | null
+  format?: string | null
+  bitrate?: string | null
+  size?: string | null
+  posted?: string | null
+  category?: string | null
+}
+
+export type AbbDetails = {
+  title: string
+  url: string
+  info_hash?: string | null
+  magnet_uri?: string | null
+  cover_url?: string | null
+  description?: string | null
+  author?: string | null
+  narrator?: string | null
+  format?: string | null
+  bitrate?: string | null
+  size?: string | null
 }

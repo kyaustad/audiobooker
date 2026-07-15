@@ -21,6 +21,7 @@ pub struct CreateDownloadRequest {
 #[derive(Deserialize)]
 pub struct MatchRequest {
     pub match_data: MetadataMatch,
+    pub library_id: Option<i64>,
 }
 
 async fn attach_metadata(pool: &sqlx::SqlitePool, download: Download) -> AppResult<DownloadWithMetadata> {
@@ -94,6 +95,27 @@ pub async fn list_for_username(
         downloads.push(attach_metadata(&state.pool, row).await?);
     }
     Ok(Json(json!({ "username": user.username, "downloads": downloads })))
+}
+
+pub async fn get(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    Path(id): Path<i64>,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(AppError::Forbidden);
+    }
+    let download = sqlx::query_as::<_, Download>(
+        "SELECT * FROM downloads WHERE id = ? AND user_id = ?",
+    )
+    .bind(id)
+    .bind(auth.user.id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(Json(json!({
+        "download": attach_metadata(&state.pool, download).await?
+    })))
 }
 
 pub async fn create(
@@ -179,6 +201,36 @@ pub async fn match_metadata(
     let authors = serde_json::to_string(&m.authors).unwrap_or_else(|_| "[]".into());
     let narrators = serde_json::to_string(&m.narrators).unwrap_or_else(|_| "[]".into());
 
+    // Resolve which Audiobookshelf library this import should land in.
+    let allowed = sqlx::query_as::<_, (i64, String)>(
+        r#"
+        SELECT l.id, l.path FROM libraries l
+        INNER JOIN user_libraries ul ON ul.library_id = l.id
+        WHERE ul.user_id = ?
+        ORDER BY l.name
+        "#,
+    )
+    .bind(auth.user.id)
+    .fetch_all(&state.pool)
+    .await?;
+    if allowed.is_empty() {
+        return Err(AppError::BadRequest(
+            "Your account has no libraries assigned. Ask an admin to grant library access.".into(),
+        ));
+    }
+    let library_id = if let Some(id) = body.library_id {
+        if !allowed.iter().any(|(lid, _)| *lid == id) {
+            return Err(AppError::Forbidden);
+        }
+        id
+    } else if allowed.len() == 1 {
+        allowed[0].0
+    } else {
+        return Err(AppError::BadRequest(
+            "Select which Audiobookshelf library to import into".into(),
+        ));
+    };
+
     sqlx::query("DELETE FROM book_metadata WHERE download_id = ?")
         .bind(download.id)
         .execute(&state.pool)
@@ -218,9 +270,10 @@ pub async fn match_metadata(
         .await?;
 
     sqlx::query(
-        "UPDATE downloads SET status = 'queued', name = COALESCE(name, ?), updated_at = datetime('now') WHERE id = ?",
+        "UPDATE downloads SET status = 'queued', name = COALESCE(name, ?), library_id = ?, updated_at = datetime('now') WHERE id = ?",
     )
     .bind(&m.title)
+    .bind(library_id)
     .bind(download.id)
     .execute(&state.pool)
     .await?;

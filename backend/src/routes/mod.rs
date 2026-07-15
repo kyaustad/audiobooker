@@ -2,6 +2,7 @@ mod abb;
 mod api_key;
 mod auth;
 mod downloads;
+mod libraries;
 mod metadata;
 mod push;
 mod settings;
@@ -30,18 +31,30 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/me", get(auth::me))
         .route("/auth/password", put(auth::change_password))
         .route("/users", get(users::list).post(users::create))
-        .route("/users/{id}", delete(users::delete))
+        .route("/users/{id}", put(users::update).delete(users::delete))
         .route("/settings", get(settings::get).put(settings::update))
         .route("/settings/test-qbittorrent", post(settings::test_qbittorrent))
         .route("/settings/vapid", post(settings::ensure_vapid))
+        .route("/libraries", get(libraries::list_all).post(libraries::create))
+        .route("/libraries/mine", get(libraries::list_for_me))
+        .route("/libraries/sync-abs", post(libraries::sync_from_abs))
+        .route(
+            "/libraries/{id}",
+            put(libraries::update).delete(libraries::delete),
+        )
         .route("/api-key", get(api_key::info).post(api_key::rotate))
         .route("/downloads", get(downloads::list).post(downloads::create))
-        .route("/downloads/{id}", delete(downloads::delete))
+        .route(
+            "/downloads/{id}",
+            get(downloads::get).delete(downloads::delete),
+        )
         .route("/downloads/{id}/match", post(downloads::match_metadata))
         .route("/metadata/search", get(metadata::search))
         .route("/metadata/asin/{asin}", get(metadata::by_asin))
         .route("/push/vapid", get(push::vapid_public))
         .route("/push/subscribe", post(push::subscribe))
+        .route("/push/status", get(push::status))
+        .route("/push/unsubscribe", post(push::unsubscribe))
         .route("/abb/search", get(abb::search))
         .route("/abb/details", get(abb::details))
         .route("/v1/user", post(users::create))

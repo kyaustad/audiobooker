@@ -61,6 +61,9 @@ pub struct Settings {
     #[serde(skip_serializing)]
     pub vapid_private_key: String,
     pub vapid_subject: String,
+    pub audiobookshelf_url: String,
+    #[serde(skip_serializing)]
+    pub audiobookshelf_token: String,
     pub updated_at: String,
 }
 
@@ -77,6 +80,8 @@ pub struct SettingsPublic {
     pub sync_interval_ms: i64,
     pub vapid_public_key: String,
     pub vapid_configured: bool,
+    pub audiobookshelf_url: String,
+    pub audiobookshelf_token_set: bool,
 }
 
 impl From<Settings> for SettingsPublic {
@@ -93,8 +98,19 @@ impl From<Settings> for SettingsPublic {
             sync_interval_ms: s.sync_interval_ms,
             vapid_public_key: s.vapid_public_key.clone(),
             vapid_configured: !s.vapid_public_key.is_empty() && !s.vapid_private_key.is_empty(),
+            audiobookshelf_url: s.audiobookshelf_url,
+            audiobookshelf_token_set: !s.audiobookshelf_token.is_empty(),
         }
     }
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Library {
+    pub id: i64,
+    pub name: String,
+    pub path: String,
+    pub abs_id: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -112,6 +128,7 @@ pub struct Download {
     pub content_path: Option<String>,
     pub destination_path: Option<String>,
     pub error_message: Option<String>,
+    pub library_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,

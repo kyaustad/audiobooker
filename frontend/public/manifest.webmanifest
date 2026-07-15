@@ -1,17 +1,30 @@
 {
   "name": "Audiobooker",
   "short_name": "Audiobooker",
-  "description": "Audiobook downloads for Audiobookshelf",
-  "start_url": "/",
+  "description": "Request and import audiobooks for Audiobookshelf",
+  "start_url": "/#/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0f1419",
   "theme_color": "#0f1419",
   "icons": [
     {
-      "src": "/favicon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

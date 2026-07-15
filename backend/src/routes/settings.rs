@@ -20,6 +20,8 @@ pub struct UpdateSettingsRequest {
     pub metadata_provider_url: Option<String>,
     pub sync_interval_ms: Option<i64>,
     pub vapid_subject: Option<String>,
+    pub audiobookshelf_url: Option<String>,
+    pub audiobookshelf_token: Option<String>,
 }
 
 pub async fn get(State(state): State<AppState>, auth: AuthSession) -> AppResult<Json<Value>> {
@@ -72,6 +74,14 @@ pub async fn update(
     if let Some(v) = body.vapid_subject {
         settings.vapid_subject = v;
     }
+    if let Some(v) = body.audiobookshelf_url {
+        settings.audiobookshelf_url = v.trim_end_matches('/').to_string();
+    }
+    if let Some(v) = body.audiobookshelf_token {
+        if !v.is_empty() {
+            settings.audiobookshelf_token = v;
+        }
+    }
 
     sqlx::query(
         r#"
@@ -86,6 +96,8 @@ pub async fn update(
             metadata_provider_url = ?,
             sync_interval_ms = ?,
             vapid_subject = ?,
+            audiobookshelf_url = ?,
+            audiobookshelf_token = ?,
             updated_at = datetime('now')
         WHERE id = 1
         "#,
@@ -100,6 +112,8 @@ pub async fn update(
     .bind(&settings.metadata_provider_url)
     .bind(settings.sync_interval_ms)
     .bind(&settings.vapid_subject)
+    .bind(&settings.audiobookshelf_url)
+    .bind(&settings.audiobookshelf_token)
     .execute(&state.pool)
     .await?;
 

@@ -97,7 +97,7 @@
       <nav class="nav">
         {#if user.role === 'user'}
           <a href="#/" class:active={path === '/'}>Queue</a>
-          <a href="#/browse" class:active={path.startsWith('/browse')}>AudiobookBay</a>
+          <a href="#/browse" class:active={path.startsWith('/browse')}>Discover</a>
         {/if}
         {#if user.role === 'root'}
           <a href="#/settings" class:active={path === '/settings'}>Settings</a>

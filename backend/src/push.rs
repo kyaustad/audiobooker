@@ -39,7 +39,18 @@ pub async fn ensure_vapid_keys(pool: &SqlitePool) -> AppResult<(String, String)>
     let (public_b64, private_pem) = generate_vapid_keypair()?;
 
     sqlx::query(
-        "UPDATE settings SET vapid_public_key = ?, vapid_private_key = ?, updated_at = datetime('now') WHERE id = 1",
+        r#"
+        UPDATE settings SET
+            vapid_public_key = ?,
+            vapid_private_key = ?,
+            vapid_subject = CASE
+                WHEN vapid_subject = '' OR vapid_subject = 'mailto:admin@localhost'
+                THEN 'mailto:audiobooker@localhost'
+                ELSE vapid_subject
+            END,
+            updated_at = datetime('now')
+        WHERE id = 1
+        "#,
     )
     .bind(&public_b64)
     .bind(&private_pem)

@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, type Download } from '../lib/api'
-  import { enableNotifications } from '../lib/push'
+  import { enableNotifications, disableNotifications, getPushStatus } from '../lib/push'
   import { showToast } from '../lib/toast'
 
   let downloads = $state<Download[]>([])
@@ -10,6 +10,9 @@
   let name = $state('')
   let loading = $state(true)
   let submitting = $state(false)
+  let pushBusy = $state(false)
+  let pushSubscribed = $state(false)
+  let pushSupported = $state(true)
   let timer: number | undefined
 
   async function refresh() {
@@ -17,10 +20,17 @@
     downloads = data.downloads
   }
 
+  async function refreshPush() {
+    const status = await getPushStatus()
+    pushSupported = status.supported
+    pushSubscribed = status.subscribed && status.permission === 'granted'
+  }
+
   onMount(() => {
     refresh()
       .catch((e) => showToast(e.message))
       .finally(() => (loading = false))
+    refreshPush().catch(() => undefined)
     timer = window.setInterval(() => {
       refresh().catch(() => undefined)
     }, 8000)
@@ -56,12 +66,23 @@
     }
   }
 
-  async function enablePush() {
+  async function togglePush() {
+    pushBusy = true
     try {
-      await enableNotifications()
-      showToast('Notifications enabled')
+      if (pushSubscribed) {
+        await disableNotifications()
+        pushSubscribed = false
+        showToast('Notifications disabled')
+      } else {
+        await enableNotifications()
+        pushSubscribed = true
+        showToast('Notifications enabled')
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Push failed')
+      await refreshPush()
+    } finally {
+      pushBusy = false
     }
   }
 
@@ -79,7 +100,17 @@
       <h2>Your queue</h2>
       <p class="muted">Add an info hash or magnet, then match it to Audible metadata before download starts.</p>
     </div>
-    <button class="secondary" type="button" onclick={enablePush}>Enable notifications</button>
+    {#if pushSupported}
+      <button class="secondary" type="button" disabled={pushBusy} onclick={togglePush}>
+        {#if pushBusy}
+          Working…
+        {:else if pushSubscribed}
+          Notifications on
+        {:else}
+          Enable notifications
+        {/if}
+      </button>
+    {/if}
   </div>
 
   <form class="stack" style="margin-top:1rem" onsubmit={addDownload}>
