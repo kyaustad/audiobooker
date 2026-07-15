@@ -4,6 +4,7 @@
   import { api } from './lib/api'
   import { currentUser } from './lib/session'
   import { toast } from './lib/toast'
+  import { registerServiceWorker } from './lib/sw'
   import Setup from './pages/Setup.svelte'
   import Login from './pages/Login.svelte'
   import Dashboard from './pages/Dashboard.svelte'
@@ -19,14 +20,15 @@
   let toastMsg = $state<string | null>(null)
   let user = $state(null as import('./lib/api').User | null)
   let path = $state(router.location)
+  let menuOpen = $state(false)
 
   currentUser.subscribe((v) => (user = v))
   toast.subscribe((v) => (toastMsg = v))
 
-  // Poll hash location for nav highlighting (router.location is not a Svelte store in v5)
   onMount(() => {
     const sync = () => {
       path = router.location
+      menuOpen = false
     }
     sync()
     window.addEventListener('hashchange', sync)
@@ -77,26 +79,51 @@
 
   onMount(() => {
     bootstrap()
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => undefined)
-    }
+    registerServiceWorker()
   })
 
   async function logout() {
+    menuOpen = false
     await api.logout()
     currentUser.set(null)
     await push('/login')
     path = router.location
+  }
+
+  function pageTitle() {
+    if (path.startsWith('/browse')) return 'Discover'
+    if (path.startsWith('/match')) return 'Match'
+    if (path.startsWith('/map')) return 'Map pack'
+    if (path.startsWith('/settings')) return 'Settings'
+    if (path.startsWith('/users')) return 'Users'
+    if (path.startsWith('/api-key')) return 'API Key'
+    if (path.startsWith('/password')) return 'Password'
+    return 'Queue'
   }
 </script>
 
 {#if loading}
   <div class="auth-wrap"><p class="muted">Loading Audiobooker…</p></div>
 {:else if user && path !== '/login' && path !== '/setup'}
-  <div class="shell">
+  <div class="shell" class:is-root={user.role === 'root'}>
     <header class="topbar">
-      <div class="brand">Audiobooker</div>
-      <nav class="nav">
+      <div class="topbar-main">
+        <div class="brand-block">
+          <div class="brand">Audiobooker</div>
+          <div class="page-title">{pageTitle()}</div>
+        </div>
+        <button
+          class="menu-toggle secondary"
+          type="button"
+          aria-expanded={menuOpen}
+          aria-label="Open menu"
+          onclick={() => (menuOpen = !menuOpen)}
+        >
+          {menuOpen ? 'Close' : 'Menu'}
+        </button>
+      </div>
+
+      <nav class="nav-desktop" aria-label="Primary">
         {#if user.role === 'user'}
           <a href="#/" class:active={path === '/'}>Queue</a>
           <a href="#/browse" class:active={path.startsWith('/browse')}>Discover</a>
@@ -109,8 +136,53 @@
         <a href="#/password" class:active={path === '/password'}>Password</a>
         <button class="linkish" type="button" onclick={logout}>Sign out</button>
       </nav>
+
+      {#if menuOpen}
+        <nav class="nav-drawer" aria-label="Menu">
+          {#if user.role === 'user'}
+            <a href="#/" class:active={path === '/'}>Queue</a>
+            <a href="#/browse" class:active={path.startsWith('/browse')}>Discover</a>
+          {/if}
+          {#if user.role === 'root'}
+            <a href="#/settings" class:active={path === '/settings'}>Settings</a>
+            <a href="#/users" class:active={path === '/users'}>Users</a>
+            <a href="#/api-key" class:active={path === '/api-key'}>API Key</a>
+          {/if}
+          <a href="#/password" class:active={path === '/password'}>Password</a>
+          <button class="linkish" type="button" onclick={logout}>Sign out</button>
+        </nav>
+      {/if}
     </header>
-    <Router routes={authedRoutes} />
+
+    <main class="main">
+      <Router routes={authedRoutes} />
+    </main>
+
+    {#if user.role === 'user'}
+      <nav class="bottom-nav" aria-label="Primary">
+        <a href="#/" class:active={path === '/' || path.startsWith('/match') || path.startsWith('/map')}>
+          <span class="bn-label">Queue</span>
+        </a>
+        <a href="#/browse" class:active={path.startsWith('/browse')}>
+          <span class="bn-label">Discover</span>
+        </a>
+        <a href="#/password" class:active={path.startsWith('/password')}>
+          <span class="bn-label">Account</span>
+        </a>
+      </nav>
+    {:else if user.role === 'root'}
+      <nav class="bottom-nav" aria-label="Primary">
+        <a href="#/settings" class:active={path === '/settings'}>
+          <span class="bn-label">Settings</span>
+        </a>
+        <a href="#/users" class:active={path === '/users'}>
+          <span class="bn-label">Users</span>
+        </a>
+        <a href="#/api-key" class:active={path === '/api-key'}>
+          <span class="bn-label">API</span>
+        </a>
+      </nav>
+    {/if}
   </div>
 {:else}
   <Router routes={publicRoutes} />

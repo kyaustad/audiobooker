@@ -17,8 +17,6 @@
   let pushSupported = $state(true)
   let needsHttps = $state(false)
   let tab = $state<Tab>('all')
-  let confirmId = $state<number | null>(null)
-  let confirmText = $state('')
   let removingId = $state<number | null>(null)
   let timer: number | undefined
 
@@ -104,30 +102,19 @@
     }
   }
 
-  function beginRemove(d: Download) {
+  async function remove(d: Download) {
     if (!canRemove(d)) {
       showToast('Completed downloads stay in the queue to seed. qBittorrent removes them at your ratio limit.')
       return
     }
-    confirmId = d.id
-    confirmText = ''
-  }
-
-  function cancelRemove() {
-    confirmId = null
-    confirmText = ''
-  }
-
-  async function confirmRemove(d: Download) {
-    if (confirmText.trim().toUpperCase() !== 'REMOVE') {
-      showToast('Type REMOVE to confirm')
+    const label = d.metadata?.title || d.name || 'this download'
+    if (!window.confirm(`Remove “${label}” from the queue?\n\nThis also removes it from qBittorrent but keeps downloaded files.`)) {
       return
     }
     removingId = d.id
     try {
       await api.deleteDownload(d.id)
       showToast('Removed from queue')
-      cancelRemove()
       await refresh()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to remove')
@@ -185,13 +172,15 @@
   }
 </script>
 
-<div class="card">
-  <div class="row" style="justify-content:space-between;align-items:start">
+<div class="card queue-hero">
+  <div class="queue-hero-top">
     <div>
       <h2>Your queue</h2>
-      <p class="muted">Add an info hash or magnet, then match it to Audible metadata before download starts.</p>
+      <p class="muted hide-mobile">
+        Add an info hash or magnet, then match Audible metadata before download starts.
+      </p>
       {#if pushSupported}
-        <p class="muted" style="margin-top:0.35rem">
+        <p class="muted push-line">
           Notifications: {pushSubscribed ? 'on' : 'off'}
           {#if needsHttps}
             · require HTTPS
@@ -200,7 +189,7 @@
       {/if}
     </div>
     {#if pushSupported}
-      <div class="row" style="align-items:start">
+      <div class="push-actions">
         <button class="secondary" type="button" disabled={pushBusy} onclick={togglePush}>
           {#if pushBusy}
             Working…
@@ -217,21 +206,21 @@
     {/if}
   </div>
 
-  <form class="stack" style="margin-top:1rem" onsubmit={addDownload}>
+  <form class="stack add-form" onsubmit={addDownload}>
     <label>Magnet or info hash
       <input bind:value={input} placeholder="magnet:?xt=urn:btih:… or 40-char hash" required />
     </label>
     <label>Display name (optional)
       <input bind:value={name} placeholder="Working title" />
     </label>
-    <div class="row">
+    <div class="add-actions">
       <button type="submit" disabled={submitting}>{submitting ? 'Adding…' : 'Add download'}</button>
-      <a class="btn secondary" href="#/browse" style="display:inline-flex;align-items:center">Open Discover</a>
+      <a class="btn secondary" href="#/browse">Discover</a>
     </div>
   </form>
 </div>
 
-<div class="card">
+<div class="card downloads-panel">
   <h3>Downloads</h3>
   <div class="status-tabs" role="tablist" aria-label="Download status">
     {#each [
@@ -266,103 +255,102 @@
       {/if}
     </p>
   {:else}
-    <div class="download-grid" style="margin-top:0.75rem">
+    <div class="download-grid">
       {#each visible as d}
-        <div class="card download-item" style="margin:0">
-          <img src={d.metadata?.cover_url || '/favicon.svg'} alt="" />
-          <div>
-            <strong>{d.metadata?.title || d.name || 'Untitled'}</strong>
+        <article class="download-item">
+          <img class="cover" src={d.metadata?.cover_url || '/favicon.svg'} alt="" />
+          <div class="meta">
+            <strong class="title">{d.metadata?.title || d.name || 'Untitled'}</strong>
             {#if d.metadata?.authors?.length}
-              <div class="muted">{d.metadata.authors.join(', ')}</div>
+              <div class="muted author">{d.metadata.authors.join(', ')}</div>
             {/if}
-            <div style="margin:0.45rem 0">
+            <div class="badges">
               <span class={`badge ${d.status}`}>{statusLabel(d.status)}</span>
               {#if isPack(d)}
                 <span class="badge pack">pack</span>
               {/if}
             </div>
             <div class="progress"><span style={`width:${Math.round(d.progress * 100)}%`}></span></div>
-            <div class="muted" style="margin-top:0.35rem">
+            <div class="muted stats">
               {Math.round(d.progress * 100)}% · {formatBytes(d.download_speed)}
             </div>
             {#if packProgress(d)}
               <div class="muted">{packProgress(d)}</div>
             {/if}
             {#if d.destination_path}
-              <div class="muted">Imported to {d.destination_path}</div>
+              <div class="muted dest">Imported to {d.destination_path}</div>
             {/if}
             {#if SEEDING_STATUSES.has(d.status)}
-              <div class="muted seeding-note">Seeding in qBittorrent — leave this entry; the client drops it at your ratio.</div>
+              <div class="muted seeding-note">Seeding in qBittorrent — left locked until ratio rules drop it.</div>
             {/if}
             {#if d.error_message}
-              <div style="color:var(--danger);font-size:0.85rem">{d.error_message}</div>
-            {/if}
-
-            {#if confirmId === d.id}
-              <div class="remove-confirm">
-                <p>
-                  This removes the torrent from Audiobooker’s queue and from qBittorrent
-                  <strong>without</strong> deleting downloaded files. Type <code>REMOVE</code> to confirm.
-                </p>
-                <input
-                  bind:value={confirmText}
-                  placeholder="Type REMOVE"
-                  autocomplete="off"
-                  aria-label="Type REMOVE to confirm"
-                />
-                <div class="row">
-                  <button
-                    class="danger"
-                    type="button"
-                    disabled={removingId === d.id || confirmText.trim().toUpperCase() !== 'REMOVE'}
-                    onclick={() => confirmRemove(d)}
-                  >
-                    {removingId === d.id ? 'Removing…' : 'Confirm remove'}
-                  </button>
-                  <button class="secondary" type="button" disabled={removingId === d.id} onclick={cancelRemove}>
-                    Cancel
-                  </button>
-                </div>
-              </div>
+              <div class="err">{d.error_message}</div>
             {/if}
           </div>
-          <div class="actions stack">
+          <div class="actions">
             {#if d.status === 'awaiting_match'}
               <a class="btn" href={`#/match/${d.id}`}>Match</a>
             {:else if isPack(d) && ['queued', 'downloading', 'completed', 'awaiting_map', 'partial'].includes(d.status)}
-              <a class="btn" href={`#/map/${d.id}`}>Map books</a>
+              <a class="btn" href={`#/map/${d.id}`}>Map</a>
             {/if}
             {#if canRemove(d)}
-              {#if confirmId !== d.id}
-                <button class="danger" type="button" onclick={() => beginRemove(d)}>Remove</button>
-              {/if}
+              <button class="danger" type="button" disabled={removingId === d.id} onclick={() => remove(d)}>
+                {removingId === d.id ? '…' : 'Remove'}
+              </button>
             {:else}
-              <span class="muted tiny">Seeding — locked</span>
+              <span class="muted tiny">Seeding</span>
             {/if}
           </div>
-        </div>
+        </article>
       {/each}
     </div>
   {/if}
 </div>
 
 <style>
-  .status-tabs {
+  .queue-hero-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: start;
+    flex-wrap: wrap;
+  }
+  .push-actions, .add-actions {
     display: flex;
     flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .add-form {
+    margin-top: 1rem;
+  }
+  .push-line {
+    margin-top: 0.35rem;
+  }
+  .status-tabs {
+    display: flex;
+    flex-wrap: nowrap;
     gap: 0.4rem;
-    margin: 0.75rem 0 0.25rem;
+    margin: 0.75rem 0 0.85rem;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 0.15rem;
+  }
+  .status-tabs::-webkit-scrollbar {
+    display: none;
   }
   .status-tabs .tab {
     background: transparent !important;
     color: var(--muted) !important;
     border: 1px solid var(--border) !important;
     border-radius: 999px;
-    padding: 0.35rem 0.75rem !important;
+    padding: 0.4rem 0.8rem !important;
     font-weight: 600;
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
   .status-tabs .tab.active,
   .status-tabs .tab:hover {
@@ -381,28 +369,124 @@
   .tab.active .count {
     color: var(--accent);
   }
+  .download-grid {
+    display: grid;
+    gap: 0.75rem;
+  }
+  .download-item {
+    display: grid;
+    grid-template-columns: 72px 1fr auto;
+    gap: 0.75rem 0.85rem;
+    align-items: start;
+    padding: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+  }
+  .cover {
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+  }
+  .title {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.25;
+  }
+  .author {
+    margin-top: 0.15rem;
+  }
+  .badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin: 0.45rem 0 0.4rem;
+  }
+  .stats {
+    margin-top: 0.35rem;
+  }
+  .dest {
+    margin-top: 0.25rem;
+    word-break: break-all;
+    font-size: 0.8rem;
+  }
   .seeding-note {
     margin-top: 0.35rem;
     font-size: 0.82rem;
   }
-  .remove-confirm {
-    margin-top: 0.75rem;
-    padding: 0.75rem;
-    border: 1px solid color-mix(in oklab, var(--danger) 45%, var(--border));
-    border-radius: 8px;
-    background: color-mix(in oklab, var(--danger) 8%, transparent);
-    display: grid;
-    gap: 0.55rem;
+  .err {
+    color: var(--danger);
+    font-size: 0.85rem;
+    margin-top: 0.35rem;
   }
-  .remove-confirm p {
-    margin: 0;
-    font-size: 0.88rem;
+  .actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    align-items: stretch;
+    min-width: 5.5rem;
+  }
+  .actions .btn,
+  .actions button {
+    text-align: center;
+    justify-content: center;
   }
   .tiny {
     font-size: 0.78rem;
   }
-  code {
-    font-family: var(--mono);
-    font-size: 0.9em;
+  .hide-mobile {
+    display: block;
+  }
+  @media (max-width: 640px) {
+    .hide-mobile {
+      display: none;
+    }
+    .download-item {
+      grid-template-columns: 64px 1fr;
+      grid-template-areas:
+        'cover meta'
+        'actions actions';
+    }
+    .cover {
+      grid-area: cover;
+      width: 64px;
+      height: 64px;
+    }
+    .meta {
+      grid-area: meta;
+      min-width: 0;
+    }
+    .actions {
+      grid-area: actions;
+      flex-direction: row;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .actions .btn,
+    .actions button {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0.45rem 0.65rem;
+      font-size: 0.9rem;
+    }
+    .push-actions {
+      width: 100%;
+    }
+    .push-actions button {
+      flex: 1 1 auto;
+    }
+    .add-actions {
+      flex-direction: column;
+    }
+    .add-actions > * {
+      width: 100%;
+      text-align: center;
+      justify-content: center;
+    }
   }
 </style>

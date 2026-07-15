@@ -1,4 +1,5 @@
 {
+  "id": "audiobooker-v2",
   "name": "Audiobooker",
   "short_name": "Audiobooker",
   "description": "Request and import audiobooks for Audiobookshelf",
