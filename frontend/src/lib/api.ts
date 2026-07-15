@@ -163,6 +163,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ endpoint }),
     }),
+  testPush: () => request('/push/test', { method: 'POST' }),
 }
 
 export type AbbSearchResult = {

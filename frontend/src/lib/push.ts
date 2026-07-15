@@ -16,7 +16,7 @@ export async function getPushStatus() {
   const permission = Notification.permission
   try {
     const server = await api.pushStatus()
-    return { supported: true, permission, subscribed: server.subscribed }
+    return { supported: true, permission, subscribed: server.subscribed && permission === 'granted' }
   } catch {
     return { supported: true, permission, subscribed: false }
   }
@@ -33,24 +33,35 @@ export async function enableNotifications() {
   const permission = await Notification.requestPermission()
   if (permission !== 'granted') throw new Error('Notification permission denied')
 
-  const reg = await navigator.serviceWorker.register('/sw.js')
+  const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' })
   await navigator.serviceWorker.ready
 
   const { vapid_public_key } = await api.ensureVapid()
+  const key = urlBase64ToUint8Array(vapid_public_key)
+
   let sub = await reg.pushManager.getSubscription()
-  if (!sub) {
-    sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(vapid_public_key),
-    })
+  if (sub) {
+    // Re-subscribe if the browser subscription is stale vs current VAPID key.
+    try {
+      await api.subscribePush(sub.toJSON())
+      return sub
+    } catch {
+      await sub.unsubscribe().catch(() => undefined)
+      sub = null
+    }
   }
+
+  sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: key,
+  })
   await api.subscribePush(sub.toJSON())
   return sub
 }
 
 export async function disableNotifications() {
   if (!('serviceWorker' in navigator)) return
-  const reg = await navigator.serviceWorker.getRegistration('/sw.js')
+  const reg = await navigator.serviceWorker.getRegistration('/')
   const sub = await reg?.pushManager.getSubscription()
   if (sub) {
     await api.unsubscribePush(sub.endpoint)
@@ -58,4 +69,8 @@ export async function disableNotifications() {
   } else {
     await api.unsubscribePush()
   }
+}
+
+export async function sendTestNotification() {
+  await api.testPush()
 }

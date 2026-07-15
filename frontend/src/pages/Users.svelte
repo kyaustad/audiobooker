@@ -101,19 +101,24 @@
       </label>
     </div>
     {#if libraries.length}
-      <fieldset class="libs">
-        <legend class="muted">Libraries</legend>
-        {#each libraries as lib}
-          <label class="check">
-            <input
-              type="checkbox"
-              checked={createLibraryIds.includes(lib.id)}
-              onchange={() => toggleCreateLib(lib.id)}
-            />
-            {lib.name} <span class="muted">({lib.path})</span>
-          </label>
-        {/each}
-      </fieldset>
+      <div class="lib-picker">
+        <div class="lib-picker-label">Libraries</div>
+        <div class="lib-list">
+          {#each libraries as lib}
+            <label class="lib-option">
+              <input
+                type="checkbox"
+                checked={createLibraryIds.includes(lib.id)}
+                onchange={() => toggleCreateLib(lib.id)}
+              />
+              <span class="lib-copy">
+                <span class="lib-name">{lib.name}</span>
+                <span class="lib-path">{lib.path}</span>
+              </span>
+            </label>
+          {/each}
+        </div>
+      </div>
     {:else}
       <p class="muted">Add libraries under Settings first.</p>
     {/if}
@@ -128,20 +133,22 @@
     <div class="stack">
       {#each users as u}
         <div class="user-row">
-          <div>
-            <strong>{u.username}</strong>
-            <span class="badge" style="margin-left:0.4rem">{u.role}</span>
-            {#if u.must_change_password}
-              <span class="badge awaiting_match" style="margin-left:0.25rem">must change password</span>
-            {/if}
+          <div class="user-meta">
+            <div class="user-title">
+              <strong>{u.username}</strong>
+              <span class="badge">{u.role}</span>
+              {#if u.must_change_password}
+                <span class="badge awaiting_match">must change password</span>
+              {/if}
+            </div>
             {#if u.role !== 'root'}
-              <div class="muted" style="margin-top:0.25rem">
+              <div class="muted user-libs">
                 {(u.libraries || []).map((l) => l.name).join(', ') || 'No libraries'}
               </div>
             {/if}
           </div>
           {#if u.role !== 'root'}
-            <div class="row">
+            <div class="user-actions">
               <button class="secondary" type="button" onclick={() => startEdit(u)}>Edit</button>
               <button class="danger" type="button" onclick={() => remove(u.id)}>Delete</button>
             </div>
@@ -153,20 +160,25 @@
             <label>Reset password (optional)
               <input bind:value={editPassword} type="password" minlength="8" placeholder="Leave blank to keep" />
             </label>
-            <fieldset class="libs">
-              <legend class="muted">Libraries</legend>
-              {#each libraries as lib}
-                <label class="check">
-                  <input
-                    type="checkbox"
-                    checked={editLibraryIds.includes(lib.id)}
-                    onchange={() => toggleEditLib(lib.id)}
-                  />
-                  {lib.name} <span class="muted">({lib.path})</span>
-                </label>
-              {/each}
-            </fieldset>
-            <div class="row">
+            <div class="lib-picker">
+              <div class="lib-picker-label">Libraries</div>
+              <div class="lib-list">
+                {#each libraries as lib}
+                  <label class="lib-option">
+                    <input
+                      type="checkbox"
+                      checked={editLibraryIds.includes(lib.id)}
+                      onchange={() => toggleEditLib(lib.id)}
+                    />
+                    <span class="lib-copy">
+                      <span class="lib-name">{lib.name}</span>
+                      <span class="lib-path">{lib.path}</span>
+                    </span>
+                  </label>
+                {/each}
+              </div>
+            </div>
+            <div class="user-actions">
               <button type="button" onclick={() => saveEdit(u.id)}>Save</button>
               <button class="secondary" type="button" onclick={() => (editingId = null)}>Cancel</button>
             </div>
@@ -178,18 +190,62 @@
 </div>
 
 <style>
-  .libs {
+  .lib-picker {
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 0.65rem 0.8rem;
-    margin: 0;
+    background: var(--bg);
+    overflow: hidden;
   }
-  .check {
+  .lib-picker-label {
+    padding: 0.5rem 0.85rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .lib-list {
     display: flex;
-    align-items: center;
-    gap: 0.5rem;
+    flex-direction: column;
+  }
+  .lib-option {
+    display: flex !important;
+    flex: none !important;
+    flex-direction: row !important;
+    align-items: flex-start;
+    gap: 0.7rem;
+    margin: 0;
+    padding: 0.7rem 0.85rem;
     color: var(--text);
-    margin: 0.25rem 0;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .lib-option:last-child {
+    border-bottom: none;
+  }
+  .lib-option:hover {
+    background: var(--bg-hover);
+  }
+  .lib-option input[type='checkbox'] {
+    width: 1.05rem !important;
+    height: 1.05rem;
+    margin: 0.15rem 0 0;
+    flex: 0 0 auto;
+    accent-color: var(--accent);
+  }
+  .lib-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+  .lib-name {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .lib-path {
+    font-size: 0.82rem;
+    color: var(--muted);
+    font-family: var(--mono);
+    word-break: break-all;
   }
   .user-row {
     display: flex;
@@ -198,6 +254,20 @@
     gap: 0.75rem;
     border-bottom: 1px solid var(--border);
     padding-bottom: 0.7rem;
+  }
+  .user-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .user-libs {
+    margin-top: 0.25rem;
+  }
+  .user-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
   }
   .edit-panel {
     background: var(--bg);

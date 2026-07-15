@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, type Download } from '../lib/api'
-  import { enableNotifications, disableNotifications, getPushStatus } from '../lib/push'
+  import { enableNotifications, disableNotifications, getPushStatus, sendTestNotification } from '../lib/push'
   import { showToast } from '../lib/toast'
 
   let downloads = $state<Download[]>([])
@@ -13,6 +13,7 @@
   let pushBusy = $state(false)
   let pushSubscribed = $state(false)
   let pushSupported = $state(true)
+  let needsHttps = $state(false)
   let timer: number | undefined
 
   async function refresh() {
@@ -27,6 +28,7 @@
   }
 
   onMount(() => {
+    needsHttps = !window.isSecureContext && location.hostname !== 'localhost'
     refresh()
       .catch((e) => showToast(e.message))
       .finally(() => (loading = false))
@@ -86,6 +88,23 @@
     }
   }
 
+  async function testPush() {
+    pushBusy = true
+    try {
+      if (!pushSubscribed) {
+        await enableNotifications()
+        pushSubscribed = true
+      }
+      await sendTestNotification()
+      showToast('Test notification sent')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Test failed')
+      await refreshPush()
+    } finally {
+      pushBusy = false
+    }
+  }
+
   function formatBytes(n: number) {
     if (n <= 0) return '0 B/s'
     const u = ['B/s', 'KB/s', 'MB/s', 'GB/s']
@@ -99,17 +118,30 @@
     <div>
       <h2>Your queue</h2>
       <p class="muted">Add an info hash or magnet, then match it to Audible metadata before download starts.</p>
+      {#if pushSupported}
+        <p class="muted" style="margin-top:0.35rem">
+          Notifications: {pushSubscribed ? 'on' : 'off'}
+          {#if needsHttps}
+            · require HTTPS
+          {/if}
+        </p>
+      {/if}
     </div>
     {#if pushSupported}
-      <button class="secondary" type="button" disabled={pushBusy} onclick={togglePush}>
-        {#if pushBusy}
-          Working…
-        {:else if pushSubscribed}
-          Notifications on
-        {:else}
-          Enable notifications
-        {/if}
-      </button>
+      <div class="row" style="align-items:start">
+        <button class="secondary" type="button" disabled={pushBusy} onclick={togglePush}>
+          {#if pushBusy}
+            Working…
+          {:else if pushSubscribed}
+            Notifications on
+          {:else}
+            Enable notifications
+          {/if}
+        </button>
+        <button class="secondary" type="button" disabled={pushBusy} onclick={testPush}>
+          Send test
+        </button>
+      </div>
     {/if}
   </div>
 

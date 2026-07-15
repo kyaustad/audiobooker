@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 
 use crate::files::{build_library_relative_path, copy_completed, resolve_download_source};
 use crate::models::{BookMetadata, BookMetadataPublic, Download, Settings};
-use crate::push::{PushPayload, notify_user};
+use crate::push::{PushPayload, ensure_vapid_keys, notify_user};
 use crate::qbittorrent::{QbittorrentClient, map_state};
 
 pub fn spawn_worker(pool: SqlitePool, qb: QbittorrentClient) {
@@ -30,6 +30,7 @@ pub fn spawn_worker(pool: SqlitePool, qb: QbittorrentClient) {
 }
 
 async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<()> {
+    let _ = ensure_vapid_keys(pool).await;
     let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
         .fetch_one(pool)
         .await?;
@@ -65,7 +66,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
             .find(|t| t.hash.eq_ignore_ascii_case(&download.info_hash));
 
         let Some(torrent) = torrent else {
-            if download.status != "queued" {
+            if download.status != "queued" && download.status != "error" {
                 sqlx::query(
                     "UPDATE downloads SET status = 'error', error_message = ?, updated_at = datetime('now') WHERE id = ?",
                 )
@@ -73,6 +74,17 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
                 .bind(download.id)
                 .execute(pool)
                 .await?;
+                push(
+                    pool,
+                    &settings,
+                    download.user_id,
+                    "Download failed",
+                    &format!(
+                        "{} is no longer in qBittorrent",
+                        display_name(&download)
+                    ),
+                )
+                .await;
             }
             continue;
         };
@@ -88,6 +100,10 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         } else {
             mapped
         };
+
+        let newly_completed =
+            status == "completed" && matches!(download.status.as_str(), "queued" | "downloading");
+        let newly_failed = status == "error" && download.status != "error";
 
         let completed_at = if status == "completed" && download.completed_at.is_none() {
             Some(Utc::now().to_rfc3339())
@@ -125,12 +141,53 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         .execute(pool)
         .await?;
 
+        if newly_failed {
+            push(
+                pool,
+                &settings,
+                download.user_id,
+                "Download failed",
+                &format!("{} failed in qBittorrent ({})", display_name(&download), torrent.state),
+            )
+            .await;
+        }
+
+        if newly_completed {
+            push(
+                pool,
+                &settings,
+                download.user_id,
+                "Download finished",
+                &format!("{} finished downloading — importing…", display_name(&download)),
+            )
+            .await;
+        }
+
         if status == "completed" {
             import_download(pool, &settings, download.id).await?;
         }
     }
 
     Ok(())
+}
+
+fn display_name(download: &Download) -> String {
+    download
+        .name
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Your audiobook".into())
+}
+
+async fn push(pool: &SqlitePool, settings: &Settings, user_id: i64, title: &str, body: &str) {
+    let payload = PushPayload {
+        title: title.into(),
+        body: body.into(),
+        url: "/#/".into(),
+    };
+    if let Err(err) = notify_user(pool, settings, user_id, &payload).await {
+        tracing::warn!(error = %err, %title, "push notify failed");
+    }
 }
 
 async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i64) -> anyhow::Result<()> {
@@ -158,6 +215,17 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
         .bind(download_id)
         .execute(pool)
         .await?;
+        push(
+            pool,
+            settings,
+            download.user_id,
+            "Import failed",
+            &format!(
+                "{} finished downloading but has no Audible match",
+                display_name(&download)
+            ),
+        )
+        .await;
         return Ok(());
     };
 
@@ -205,14 +273,14 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
             .execute(pool)
             .await?;
 
-            let payload = PushPayload {
-                title: "Audiobook imported".into(),
-                body: format!("{} is ready in your library", public.title),
-                url: "/#/".into(),
-            };
-            if let Err(err) = notify_user(pool, settings, download.user_id, &payload).await {
-                tracing::warn!(error = %err, "push notify failed after import");
-            }
+            push(
+                pool,
+                settings,
+                download.user_id,
+                "Audiobook imported",
+                &format!("{} is ready in your library", public.title),
+            )
+            .await;
         }
         Err(err) => {
             sqlx::query(
@@ -223,17 +291,14 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
             .execute(pool)
             .await?;
 
-            let payload = PushPayload {
-                title: "Import failed".into(),
-                body: format!(
-                    "{} could not be copied into your library",
-                    public.title
-                ),
-                url: "/#/".into(),
-            };
-            if let Err(nerr) = notify_user(pool, settings, download.user_id, &payload).await {
-                tracing::warn!(error = %nerr, "push notify failed after import error");
-            }
+            push(
+                pool,
+                settings,
+                download.user_id,
+                "Import failed",
+                &format!("{} could not be copied into your library", public.title),
+            )
+            .await;
         }
     }
 

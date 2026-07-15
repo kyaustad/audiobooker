@@ -68,3 +68,38 @@ pub async fn unsubscribe(
     }
     Ok(Json(json!({ "ok": true })))
 }
+
+pub async fn test_push(
+    State(state): State<AppState>,
+    auth: AuthSession,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(crate::error::AppError::Forbidden);
+    }
+    ensure_vapid_keys(&state.pool).await?;
+    let settings = sqlx::query_as::<_, crate::models::Settings>("SELECT * FROM settings WHERE id = 1")
+        .fetch_one(&state.pool)
+        .await?;
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM push_subscriptions WHERE user_id = ?")
+            .bind(auth.user.id)
+            .fetch_one(&state.pool)
+            .await?;
+    if count.0 == 0 {
+        return Err(crate::error::AppError::BadRequest(
+            "Enable notifications first".into(),
+        ));
+    }
+    crate::push::notify_user(
+        &state.pool,
+        &settings,
+        auth.user.id,
+        &crate::push::PushPayload {
+            title: "Audiobooker test".into(),
+            body: "Notifications are working.".into(),
+            url: "/#/".into(),
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
