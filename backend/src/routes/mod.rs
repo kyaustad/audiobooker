@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/push/status", get(push::status))
         .route("/push/unsubscribe", post(push::unsubscribe))
         .route("/push/test", post(push::test_push))
+        .route("/abb/browse", get(abb::browse))
         .route("/abb/search", get(abb::search))
         .route("/abb/details", get(abb::details))
         .route("/v1/user", post(users::create))

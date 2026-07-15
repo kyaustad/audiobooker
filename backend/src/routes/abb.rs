@@ -16,8 +16,32 @@ pub struct SearchQuery {
 }
 
 #[derive(Deserialize)]
+pub struct BrowseQuery {
+    pub page: Option<u32>,
+}
+
+#[derive(Deserialize)]
 pub struct DetailsQuery {
     pub url: String,
+}
+
+pub async fn browse(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    Query(query): Query<BrowseQuery>,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(AppError::Forbidden);
+    }
+    let page = state.abb.latest(query.page.unwrap_or(1)).await?;
+    Ok(Json(json!({
+        "results": page.results,
+        "page": page.page,
+        "has_more": page.has_more,
+        "mirror": page.mirror,
+        "mode": page.mode,
+        "query": page.query,
+    })))
 }
 
 pub async fn search(
@@ -34,6 +58,8 @@ pub async fn search(
         "page": page.page,
         "has_more": page.has_more,
         "mirror": page.mirror,
+        "mode": page.mode,
+        "query": page.query,
     })))
 }
 

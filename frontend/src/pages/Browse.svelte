@@ -4,15 +4,17 @@
   import { api, type AbbDetails, type AbbSearchResult, type Download } from '../lib/api'
   import { showToast } from '../lib/toast'
 
+  type Mode = 'latest' | 'search'
+
   let q = $state('')
+  let mode = $state<Mode>('latest')
   let page = $state(1)
   let hasMore = $state(false)
   let mirror = $state<string | null>(null)
   let results = $state<AbbSearchResult[]>([])
-  let loading = $state(false)
+  let loading = $state(true)
   let loadingMore = $state(false)
   let requesting = $state(false)
-  let hasSearched = $state(false)
   let error = $state<string | null>(null)
   let selected = $state<AbbSearchResult | null>(null)
   let details = $state<AbbDetails | null>(null)
@@ -38,42 +40,66 @@
     })
   }
 
-  async function search(e?: Event) {
-    e?.preventDefault()
-    if (!q.trim()) return
+  async function fetchPage(nextPage: number, append: boolean) {
+    if (mode === 'search') {
+      return api.abbSearch(q.trim(), nextPage)
+    }
+    return api.abbBrowse(nextPage)
+  }
+
+  async function loadInitial(nextMode: Mode, query = q) {
+    mode = nextMode
     loading = true
     loadingMore = false
     error = null
-    hasSearched = true
     selected = null
     details = null
     page = 1
     results = []
     try {
-      const [data] = await Promise.all([api.abbSearch(q, 1), refreshQueue()])
+      const [data] = await Promise.all([
+        nextMode === 'search' ? api.abbSearch(query.trim(), 1) : api.abbBrowse(1),
+        refreshQueue(),
+      ])
       results = data.results
       page = data.page ?? 1
       hasMore = Boolean(data.has_more)
       mirror = data.mirror ?? null
+      mode = (data.mode as Mode) || nextMode
       if (!results.length) {
-        error = 'No results found. Try a simpler title, or author + title.'
+        error = nextMode === 'search' ? 'No results found for that search.' : 'No recent listings available.'
       }
     } catch (err) {
       results = []
       hasMore = false
-      error = err instanceof Error ? err.message : 'Search failed'
+      error = err instanceof Error ? err.message : 'Could not load Discover'
       showToast(error)
     } finally {
       loading = false
     }
   }
 
+  async function onSearch(e?: Event) {
+    e?.preventDefault()
+    if (!q.trim()) {
+      await showLatest()
+      return
+    }
+    await loadInitial('search', q)
+  }
+
+  async function showLatest() {
+    q = ''
+    await loadInitial('latest')
+  }
+
   async function loadMore() {
-    if (!hasMore || loading || loadingMore || !q.trim()) return
+    if (!hasMore || loading || loadingMore) return
+    if (mode === 'search' && !q.trim()) return
     loadingMore = true
     try {
       const next = page + 1
-      const data = await api.abbSearch(q, next)
+      const data = await fetchPage(next, true)
       const seen = new Set(results.map((r) => r.url))
       results = [...results, ...data.results.filter((r) => !seen.has(r.url))]
       page = data.page ?? next
@@ -92,8 +118,9 @@
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) loadMore()
       },
-      { rootMargin: '400px' },
+      { rootMargin: '480px' },
     )
+    loadInitial('latest')
   })
 
   $effect(() => {
@@ -151,45 +178,71 @@
       requesting = false
     }
   }
+
+  const heading = $derived(
+    mode === 'search' && q.trim() ? `Results for “${q.trim()}”` : 'Recently added',
+  )
 </script>
 
 <div class="discover">
   <header class="discover-hero">
     <div class="discover-hero-copy">
       <p class="abb-kicker">Discover</p>
-      <h1>AudiobookBay</h1>
+      <h1>Find audiobooks</h1>
       <p class="muted">
-        Same query params as
-        <a href="https://audiobookbay.lu/?s=sunrise+on+the+reaping&cat=undefined%2Cundefined" target="_blank" rel="noreferrer">audiobookbay.lu</a>
-        — open a title, then request it into your queue.
+        Browse the latest uploads from AudiobookBay, or search the same listings as the site.
+        Request a title to add it to your queue.
       </p>
     </div>
-    <form class="discover-search" onsubmit={search}>
+    <form class="discover-search" onsubmit={onSearch}>
       <input
         bind:value={q}
-        required
         placeholder="Search title, author, series…"
         aria-label="Search AudiobookBay"
       />
-      <button type="submit" disabled={loading}>{loading ? 'Searching…' : 'Search'}</button>
+      <button type="submit" disabled={loading}>{loading && mode === 'search' ? 'Searching…' : 'Search'}</button>
     </form>
+    <div class="mode-tabs">
+      <button
+        type="button"
+        class="tab"
+        class:active={mode === 'latest'}
+        disabled={loading}
+        onclick={showLatest}
+      >
+        Latest
+      </button>
+      <button
+        type="button"
+        class="tab"
+        class:active={mode === 'search'}
+        disabled={loading || !q.trim()}
+        onclick={() => q.trim() && onSearch()}
+      >
+        Search
+      </button>
+    </div>
   </header>
 
   {#if error}
     <div class="banner-warn">{error}</div>
   {/if}
 
+  <div class="section-head">
+    <h2>{heading}</h2>
+    <p class="muted">
+      {results.length} shown{#if hasMore}+{/if}
+      {#if mirror}<span> · {mirror.replace(/^https?:\/\//, '')}</span>{/if}
+    </p>
+  </div>
+
   {#if loading && !results.length}
     <div class="poster-grid">
-      {#each Array(8) as _}
+      {#each Array(10) as _}
         <div class="poster skeleton"></div>
       {/each}
     </div>
-  {:else if hasSearched && results.length}
-    <div class="discover-meta muted">
-      {results.length} results{#if hasMore}+{/if}
-      {#if mirror}<span>· via {mirror.replace(/^https?:\/\//, '')}</span>{/if}
-    </div>
+  {:else if results.length}
     <div class="poster-grid">
       {#each results as r}
         {@const hit = queueHit(r)}
@@ -215,14 +268,10 @@
     {#if loadingMore}
       <p class="muted" style="text-align:center">Loading more…</p>
     {:else if !hasMore}
-      <p class="muted" style="text-align:center;margin:1rem 0 1.5rem">End of results</p>
+      <p class="muted" style="text-align:center;margin:1rem 0 1.5rem">End of list</p>
     {/if}
-  {:else if hasSearched}
-    <div class="empty muted">No listings to show.</div>
   {:else}
-    <div class="empty muted">
-      Start with a search — results stay in AudiobookBay order. Requesting adds the torrent to your queue for Audible matching.
-    </div>
+    <div class="empty muted">Nothing to show yet.</div>
   {/if}
 </div>
 
@@ -327,9 +376,36 @@
     font-size: 1.05rem;
     padding: 0.8rem 0.95rem;
   }
-  .discover-meta {
-    margin: 0 0 0.85rem;
-    font-size: 0.85rem;
+  .mode-tabs {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.85rem;
+  }
+  .mode-tabs .tab {
+    background: transparent !important;
+    color: var(--muted) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 999px;
+    padding: 0.35rem 0.85rem !important;
+    font-weight: 600;
+  }
+  .mode-tabs .tab.active,
+  .mode-tabs .tab:hover:not(:disabled) {
+    color: var(--text) !important;
+    border-color: var(--accent) !important;
+    background: color-mix(in oklab, var(--accent) 12%, transparent) !important;
+  }
+  .section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin: 0.25rem 0 0.85rem;
+  }
+  .section-head h2 {
+    margin: 0;
+    font-size: 1.15rem;
+    letter-spacing: -0.02em;
   }
   .poster-grid {
     display: grid;

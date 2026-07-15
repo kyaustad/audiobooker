@@ -30,6 +30,9 @@ pub struct AbbSearchPage {
     pub page: u32,
     pub has_more: bool,
     pub mirror: String,
+    /// `latest` (homepage feed) or `search`
+    pub mode: String,
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +67,8 @@ impl AbbClient {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::limited(10))
+                .cookie_store(true)
+                .gzip(true)
                 .user_agent(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                      (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -73,59 +78,101 @@ impl AbbClient {
         }
     }
 
+    /// Homepage / “recent uploads” feed (Overseerr-style Discover default).
+    pub async fn latest(&self, page: u32) -> AppResult<AbbSearchPage> {
+        let page = page.max(1);
+        let base = ABB_MIRRORS[0];
+        let _ = self.warm_session(base).await;
+
+        let url = if page <= 1 {
+            format!("{base}/")
+        } else {
+            format!("{base}/page/{page}/")
+        };
+
+        let html = self.fetch_html(&url, base).await?;
+        let results = parse_listing(&html, base);
+        let has_more = detect_has_more(&html, page) && !results.is_empty();
+        if results.is_empty() && page == 1 {
+            return Err(AppError::Internal(
+                "Could not parse AudiobookBay homepage feed".into(),
+            ));
+        }
+        Ok(AbbSearchPage {
+            results,
+            page,
+            has_more,
+            mirror: base.to_string(),
+            mode: "latest".into(),
+            query: None,
+        })
+    }
+
     pub async fn search(&self, query: &str, page: u32) -> AppResult<AbbSearchPage> {
         let q = query.trim();
         if q.is_empty() {
             return Err(AppError::BadRequest("Search query required".into()));
         }
         let page = page.max(1);
-        // Exact param shape used by ABB's search form in the browser:
-        // https://audiobookbay.lu/?s=sunrise+on+the+reaping&cat=undefined%2Cundefined
         let encoded = encode_abb_query(q);
-        let cat = "undefined%2Cundefined";
+        let base = ABB_MIRRORS[0];
+        let _ = self.warm_session(base).await;
+
+        // Try the exact browser form first, then simpler variants ABB also accepts.
+        let url_candidates: Vec<String> = if page <= 1 {
+            vec![
+                format!("{base}/?s={encoded}&cat=undefined%2Cundefined"),
+                format!("{base}/?s={encoded}&cat=0%2C0"),
+                format!("{base}/?s={encoded}"),
+            ]
+        } else {
+            vec![
+                format!("{base}/page/{page}/?s={encoded}&cat=undefined%2Cundefined"),
+                format!("{base}/page/{page}/?s={encoded}&cat=0%2C0"),
+                format!("{base}/page/{page}/?s={encoded}"),
+            ]
+        };
 
         let mut last_err = None;
-        for base in ABB_MIRRORS {
-            let url = if page <= 1 {
-                format!("{base}/?s={encoded}&cat={cat}")
-            } else {
-                format!("{base}/page/{page}/?s={encoded}&cat={cat}")
-            };
-
+        for url in url_candidates {
             tracing::info!(%url, "ABB search fetch");
-
             match self.fetch_html(&url, base).await {
                 Ok(html) => {
-                    if !is_abb_search_results_page(&html) {
-                        tracing::warn!(%url, "ABB returned non-search HTML (homepage or challenge)");
+                    if is_abb_homepage(&html) && !is_abb_search_results_page(&html) {
+                        tracing::warn!(%url, "ABB search URL returned homepage HTML; trying next variant");
                         last_err = Some(AppError::Internal(
-                            "AudiobookBay returned the homepage instead of search results. Try again shortly.".into(),
+                            "AudiobookBay ignored the search query (got homepage). Retrying…".into(),
                         ));
+                        // Re-warm and continue
+                        let _ = self.warm_session(base).await;
                         continue;
                     }
-                    let results = parse_search(&html, base);
+
+                    let results = parse_listing(&html, base);
                     let has_more = detect_has_more(&html, page) && !results.is_empty();
                     if !results.is_empty() || page > 1 {
                         return Ok(AbbSearchPage {
                             results,
                             page,
                             has_more,
-                            mirror: (*base).to_string(),
+                            mirror: base.to_string(),
+                            mode: "search".into(),
+                            query: Some(q.to_string()),
                         });
                     }
-                    last_err = Some(AppError::Internal(format!(
-                        "AudiobookBay returned no parseable results from {base}"
-                    )));
+                    last_err = Some(AppError::Internal(
+                        "No AudiobookBay results matched that search".into(),
+                    ));
                 }
                 Err(err) => {
-                    tracing::warn!(mirror = %base, error = %err, "ABB mirror failed");
+                    tracing::warn!(error = %err, %url, "ABB search request failed");
                     last_err = Some(err);
                 }
             }
         }
 
         Err(last_err.unwrap_or_else(|| {
-            AppError::Internal("AudiobookBay is unreachable right now".into())
+            AppError::Internal("AudiobookBay search failed".into())
         }))
     }
 
@@ -139,12 +186,25 @@ impl AbbClient {
         };
 
         let base = origin_of(&url).unwrap_or_else(|| ABB_MIRRORS[0].to_string());
+        let _ = self.warm_session(&base).await;
         let html = self.fetch_html(&url, &base).await?;
         parse_details(&html, &url, &base).ok_or_else(|| {
             AppError::Internal(
                 "Could not parse AudiobookBay page (site layout may have changed)".into(),
             )
         })
+    }
+
+    async fn warm_session(&self, base: &str) -> AppResult<()> {
+        // ABB sets PHPSESSID on first visit; search without it can bounce to the homepage.
+        let _ = self
+            .http
+            .get(format!("{base}/"))
+            .header("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await?;
+        Ok(())
     }
 
     async fn fetch_html(&self, url: &str, origin: &str) -> AppResult<String> {
@@ -203,7 +263,17 @@ fn is_abb_search_results_page(html: &str) -> bool {
     html.contains("class=\"archiveTitle\"") || html.contains("class='archiveTitle'")
 }
 
-fn parse_search(html: &str, base: &str) -> Vec<AbbSearchResult> {
+fn is_abb_homepage(html: &str) -> bool {
+    let title = html
+        .split("<title>")
+        .nth(1)
+        .and_then(|s| s.split("</title>").next())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    title.contains("unabridged audiobooks free download") && !is_abb_search_results_page(html)
+}
+
+fn parse_listing(html: &str, base: &str) -> Vec<AbbSearchResult> {
     let document = Html::parse_document(html);
     // Only the main column — never sidebar "Recent Audiobook" links.
     let content_sel = match Selector::parse("#content") {
@@ -492,7 +562,7 @@ mod tests {
           </div>
         </div>
         "#;
-        let results = parse_search(html, "https://audiobookbay.lu");
+        let results = parse_listing(html, "https://audiobookbay.lu");
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].title,
@@ -523,6 +593,7 @@ mod live_tests {
         let page = client.search("sunrise on the reaping", 1).await.expect("search");
         let titles: Vec<_> = page.results.iter().map(|r| r.title.clone()).collect();
         eprintln!("mirror={} n={} titles={:?}", page.mirror, titles.len(), titles);
+        assert_eq!(page.mode, "search");
         assert!(
             titles.iter().any(|t| t.to_lowercase().contains("sunrise") && t.to_lowercase().contains("reaping")),
             "expected sunrise book in {:?}",
@@ -533,5 +604,15 @@ mod live_tests {
             "should not return homepage recent: {:?}",
             titles
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_latest_feed() {
+        let client = AbbClient::new();
+        let page = client.latest(1).await.expect("latest");
+        assert_eq!(page.mode, "latest");
+        assert!(!page.results.is_empty());
+        eprintln!("latest n={} first={}", page.results.len(), page.results[0].title);
     }
 }
