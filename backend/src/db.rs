@@ -42,6 +42,12 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
 
     run_once(pool, "001_init", include_str!("../migrations/001_init.sql")).await?;
     run_once(pool, "002_libraries", include_str!("../migrations/002_libraries.sql")).await?;
+    run_once(
+        pool,
+        "003_library_abs_path",
+        include_str!("../migrations/003_library_abs_path.sql"),
+    )
+    .await?;
     ensure_column(pool, "downloads", "library_id", "INTEGER REFERENCES libraries(id)").await?;
     ensure_column(
         pool,
@@ -57,6 +63,9 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
         "TEXT NOT NULL DEFAULT ''",
     )
     .await?;
+    // In case 003 was applied before Abs path column existed on old DBs that
+    // skipped the migration file name, ensure column still lands.
+    ensure_column(pool, "libraries", "abs_path", "TEXT").await?;
     seed_default_library(pool).await?;
     Ok(())
 }
@@ -117,18 +126,10 @@ async fn seed_default_library(pool: &SqlitePool) -> AppResult<()> {
     if count.0 > 0 {
         return Ok(());
     }
-    let path: (String,) = sqlx::query_as("SELECT library_path FROM settings WHERE id = 1")
-        .fetch_one(pool)
-        .await
-        .map_err(AppError::internal)?;
-    let path = if path.0.trim().is_empty() {
-        "/audiobooks".into()
-    } else {
-        path.0
-    };
+    // Placeholder until an admin mounts a share and assigns a container path.
     sqlx::query("INSERT INTO libraries (name, path) VALUES (?, ?)")
         .bind("Default")
-        .bind(&path)
+        .bind("__unset__/default")
         .execute(pool)
         .await
         .map_err(AppError::internal)?;

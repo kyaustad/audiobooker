@@ -230,6 +230,14 @@ pub async fn match_metadata(
             "Select which Audiobookshelf library to import into".into(),
         ));
     };
+    if let Some((_, path)) = allowed.iter().find(|(lid, _)| *lid == library_id) {
+        if crate::models::Library::path_needs_config(path) {
+            return Err(AppError::BadRequest(
+                "That library has no container path set. Ask an admin to set it under Settings → Libraries."
+                    .into(),
+            ));
+        }
+    }
 
     sqlx::query("DELETE FROM book_metadata WHERE download_id = ?")
         .bind(download.id)

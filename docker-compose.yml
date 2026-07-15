@@ -15,9 +15,10 @@ services:
       STATIC_DIR: /app/static
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
-      # SQLite + app state (must be writable)
+      # Only required volume: app DB / state
       - ${APPDATA_PATH:-./data}:/data
-      # Same tree qBittorrent completes into (read-only is fine)
-      - ${TORRENT_DOWNLOADS_PATH:-/mnt/user/downloads}:/downloads:ro
-      # Audiobookshelf library root (must be writable for imports)
-      - ${AUDIOBOOK_LIBRARY_PATH:-/mnt/user/audiobooks}:/audiobooks
+      # Add your own mounts for qBit downloads and each library, e.g.:
+      # - /mnt/user/downloads:/downloads:ro
+      # - /opt/media/audiobooks:/audiobooks
+      # - /opt/media/adultaudio:/adultaudio
+      # Then set those container paths in Settings (download path + per-library paths).

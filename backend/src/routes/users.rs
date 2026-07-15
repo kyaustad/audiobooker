@@ -27,7 +27,7 @@ pub struct UpdateUserRequest {
 async fn libraries_for_user(pool: &sqlx::SqlitePool, user_id: i64) -> AppResult<Vec<Library>> {
     let libraries = sqlx::query_as::<_, Library>(
         r#"
-        SELECT l.id, l.name, l.path, l.abs_id, l.created_at
+        SELECT l.id, l.name, l.path, l.abs_id, l.abs_path, l.created_at
         FROM libraries l
         INNER JOIN user_libraries ul ON ul.library_id = l.id
         WHERE ul.user_id = ?

@@ -12,6 +12,7 @@ export type Library = {
   name: string
   path: string
   abs_id?: string | null
+  abs_path?: string | null
   created_at?: string
 }
 
@@ -106,10 +107,13 @@ export const api = {
     request(`/libraries/${id}`, { method: 'PUT', body: JSON.stringify({ name, path }) }),
   deleteLibrary: (id: number) => request(`/libraries/${id}`, { method: 'DELETE' }),
   syncAbsLibraries: (body?: { audiobookshelf_url?: string; audiobookshelf_token?: string }) =>
-    request<{ imported: number; libraries: Library[] }>('/libraries/sync-abs', {
-      method: 'POST',
-      body: JSON.stringify(body ?? {}),
-    }),
+    request<{ imported: number; needs_path?: number; libraries: Library[] }>(
+      '/libraries/sync-abs',
+      {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      },
+    ),
   getSettings: () => request<{ settings: Record<string, unknown> }>('/settings'),
   updateSettings: (body: Record<string, unknown>) =>
     request('/settings', { method: 'PUT', body: JSON.stringify(body) }),

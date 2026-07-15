@@ -5,9 +5,11 @@ use serde::Serialize;
 use crate::error::{AppError, AppResult};
 use crate::magnet::normalize_info_hash;
 
-/// Only include mirrors that currently serve usable HTML over HTTPS.
-/// Mixing mirrors is the main reason search order diverges from the site.
+/// Only include mirrors that currently serve usable HTML/RSS over HTTPS.
 const ABB_MIRRORS: &[&str] = &["https://audiobookbay.lu"];
+
+/// WordPress lists ~9–10 posts per page on ABB.
+const ABB_PAGE_SIZE: usize = 9;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AbbSearchResult {
@@ -78,30 +80,43 @@ impl AbbClient {
         }
     }
 
-    /// Homepage / “recent uploads” feed (Overseerr-style Discover default).
+    /// Homepage / “recent uploads” feed (Discover default).
     pub async fn latest(&self, page: u32) -> AppResult<AbbSearchPage> {
         let page = page.max(1);
         let base = ABB_MIRRORS[0];
-        let _ = self.warm_session(base).await;
 
         let url = if page <= 1 {
-            format!("{base}/")
+            format!("{base}/feed/")
         } else {
-            format!("{base}/page/{page}/")
+            format!("{base}/feed/?paged={page}")
         };
 
-        let html = self.fetch_html(&url, base).await?;
-        let results = parse_listing(&html, base);
-        let has_more = detect_has_more(&html, page) && !results.is_empty();
+        tracing::info!(%url, "ABB latest RSS fetch");
+        let xml = self.fetch_text(&url, base, "application/rss+xml, application/xml, text/xml, */*;q=0.8").await?;
+        let results = parse_rss_feed(&xml, base);
         if results.is_empty() && page == 1 {
-            return Err(AppError::Internal(
-                "Could not parse AudiobookBay homepage feed".into(),
-            ));
+            // HTML homepage fallback
+            let html = self.fetch_text(&format!("{base}/"), base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8").await?;
+            let results = parse_listing(&html, base);
+            if results.is_empty() {
+                return Err(AppError::Internal(
+                    "Could not load AudiobookBay latest feed".into(),
+                ));
+            }
+            return Ok(AbbSearchPage {
+                has_more: results.len() >= ABB_PAGE_SIZE,
+                results,
+                page,
+                mirror: base.to_string(),
+                mode: "latest".into(),
+                query: None,
+            });
         }
+
         Ok(AbbSearchPage {
+            has_more: results.len() >= ABB_PAGE_SIZE,
             results,
             page,
-            has_more,
             mirror: base.to_string(),
             mode: "latest".into(),
             query: None,
@@ -114,66 +129,88 @@ impl AbbClient {
             return Err(AppError::BadRequest("Search query required".into()));
         }
         let page = page.max(1);
+        // ABB 301s mixed-case `?s=` to the homepage (losing the query). Always
+        // use lowercase like https://audiobookbay.lu/?s=sunrise+on+the+reaping&cat=undefined%2Cundefined
         let encoded = encode_abb_query(q);
         let base = ABB_MIRRORS[0];
-        let _ = self.warm_session(base).await;
 
-        // Try the exact browser form first, then simpler variants ABB also accepts.
-        let url_candidates: Vec<String> = if page <= 1 {
+        // Prefer the same HTML URL the browser search form effectively uses, then RSS.
+        let html_candidates: Vec<String> = if page <= 1 {
             vec![
                 format!("{base}/?s={encoded}&cat=undefined%2Cundefined"),
-                format!("{base}/?s={encoded}&cat=0%2C0"),
                 format!("{base}/?s={encoded}"),
             ]
         } else {
             vec![
                 format!("{base}/page/{page}/?s={encoded}&cat=undefined%2Cundefined"),
-                format!("{base}/page/{page}/?s={encoded}&cat=0%2C0"),
                 format!("{base}/page/{page}/?s={encoded}"),
             ]
         };
 
-        let mut last_err = None;
-        for url in url_candidates {
-            tracing::info!(%url, "ABB search fetch");
-            match self.fetch_html(&url, base).await {
+        for url in &html_candidates {
+            tracing::info!(%url, "ABB search HTML fetch");
+            match self
+                .fetch_text(url, base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+                .await
+            {
                 Ok(html) => {
-                    if is_abb_homepage(&html) && !is_abb_search_results_page(&html) {
-                        tracing::warn!(%url, "ABB search URL returned homepage HTML; trying next variant");
-                        last_err = Some(AppError::Internal(
-                            "AudiobookBay ignored the search query (got homepage). Retrying…".into(),
-                        ));
-                        // Re-warm and continue
-                        let _ = self.warm_session(base).await;
-                        continue;
-                    }
-
-                    let results = parse_listing(&html, base);
-                    let has_more = detect_has_more(&html, page) && !results.is_empty();
-                    if !results.is_empty() || page > 1 {
+                    if is_abb_search_results_page(&html) {
+                        let results = parse_listing(&html, base);
                         return Ok(AbbSearchPage {
+                            has_more: detect_has_more(&html, page) && !results.is_empty(),
                             results,
                             page,
-                            has_more,
                             mirror: base.to_string(),
                             mode: "search".into(),
                             query: Some(q.to_string()),
                         });
                     }
-                    last_err = Some(AppError::Internal(
-                        "No AudiobookBay results matched that search".into(),
-                    ));
+                    tracing::warn!(%url, "ABB HTML was not a search results page");
                 }
                 Err(err) => {
-                    tracing::warn!(error = %err, %url, "ABB search request failed");
-                    last_err = Some(err);
+                    tracing::warn!(error = %err, %url, "ABB search HTML failed");
                 }
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            AppError::Internal("AudiobookBay search failed".into())
-        }))
+        let rss_url = if page <= 1 {
+            format!("{base}/?s={encoded}&feed=rss2")
+        } else {
+            format!("{base}/?s={encoded}&feed=rss2&paged={page}")
+        };
+
+        tracing::info!(%rss_url, "ABB search RSS fetch");
+        match self
+            .fetch_text(
+                &rss_url,
+                base,
+                "application/rss+xml, application/xml, text/xml, */*;q=0.8",
+            )
+            .await
+        {
+            Ok(xml) => {
+                if rss_is_search_feed(&xml, &encoded) {
+                    let results = parse_rss_feed(&xml, base);
+                    return Ok(AbbSearchPage {
+                        has_more: results.len() >= ABB_PAGE_SIZE,
+                        results,
+                        page,
+                        mirror: base.to_string(),
+                        mode: "search".into(),
+                        query: Some(q.to_string()),
+                    });
+                }
+                tracing::warn!(%rss_url, "ABB RSS was not a search feed");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, %rss_url, "ABB search RSS failed");
+            }
+        }
+
+        Err(AppError::Internal(
+            "AudiobookBay returned the homepage instead of search results. Try again shortly."
+                .into(),
+        ))
     }
 
     pub async fn details(&self, path_or_url: &str) -> AppResult<AbbDetails> {
@@ -186,8 +223,9 @@ impl AbbClient {
         };
 
         let base = origin_of(&url).unwrap_or_else(|| ABB_MIRRORS[0].to_string());
-        let _ = self.warm_session(&base).await;
-        let html = self.fetch_html(&url, &base).await?;
+        let html = self
+            .fetch_text(&url, &base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+            .await?;
         parse_details(&html, &url, &base).ok_or_else(|| {
             AppError::Internal(
                 "Could not parse AudiobookBay page (site layout may have changed)".into(),
@@ -195,26 +233,11 @@ impl AbbClient {
         })
     }
 
-    async fn warm_session(&self, base: &str) -> AppResult<()> {
-        // ABB sets PHPSESSID on first visit; search without it can bounce to the homepage.
-        let _ = self
-            .http
-            .get(format!("{base}/"))
-            .header("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    async fn fetch_html(&self, url: &str, origin: &str) -> AppResult<String> {
+    async fn fetch_text(&self, url: &str, origin: &str, accept: &str) -> AppResult<String> {
         let resp = self
             .http
             .get(url)
-            .header(
-                "Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            )
+            .header("Accept", accept)
             .header("Accept-Language", "en-US,en;q=0.9")
             .header("Referer", format!("{origin}/"))
             .send()
@@ -231,8 +254,10 @@ impl AbbClient {
 }
 
 fn encode_abb_query(q: &str) -> String {
-    // WordPress search uses application/x-www-form-urlencoded (+ for spaces).
-    urlencoding::encode(q)
+    // ABB's nginx/app 301s mixed-case `?s=Sunrise+…` to `/` (homepage). The working
+    // browser URL always uses lowercase: ?s=sunrise+on+the+reaping&cat=undefined%2Cundefined
+    let q = q.trim().to_ascii_lowercase();
+    urlencoding::encode(&q)
         .replace("%20", "+")
         .replace("%2B", "+")
 }
@@ -263,14 +288,197 @@ fn is_abb_search_results_page(html: &str) -> bool {
     html.contains("class=\"archiveTitle\"") || html.contains("class='archiveTitle'")
 }
 
-fn is_abb_homepage(html: &str) -> bool {
-    let title = html
-        .split("<title>")
-        .nth(1)
-        .and_then(|s| s.split("</title>").next())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    title.contains("unabridged audiobooks free download") && !is_abb_search_results_page(html)
+/// True when the RSS document is clearly a search feed for this query.
+fn rss_is_search_feed(xml: &str, encoded_query: &str) -> bool {
+    let lower = xml.to_ascii_lowercase();
+    // Homepage feed self-link is /feed — never treat that as search.
+    if lower.contains("href=\"http://audiobookbay.lu/feed\"")
+        || lower.contains("href=\"https://audiobookbay.lu/feed\"")
+        || lower.contains("href=\"http://audiobookbay.lu/feed/\"")
+        || lower.contains("href=\"https://audiobookbay.lu/feed/\"")
+    {
+        return false;
+    }
+    let needle = format!("s={}", encoded_query.to_ascii_lowercase());
+    lower.contains(&needle) && (lower.contains("feed=rss2") || lower.contains("feed=rss"))
+}
+
+fn sanitize_xml(xml: &str) -> String {
+    // ABB/WordPress occasionally emits bare `&` inside descriptions.
+    regex::Regex::new(r"&(?![#a-zA-Z0-9]+;)")
+        .map(|re| re.replace_all(xml, "&amp;").into_owned())
+        .unwrap_or_else(|_| xml.to_string())
+}
+
+fn parse_rss_feed(xml: &str, base: &str) -> Vec<AbbSearchResult> {
+    let xml = sanitize_xml(xml);
+    let item_re = match regex::Regex::new(r"(?is)<item>(.*?)</item>") {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let title_re = regex::Regex::new(r"(?is)<title>(.*?)</title>").ok();
+    let link_re = regex::Regex::new(r"(?is)<link>(.*?)</link>").ok();
+    let thumb_re =
+        regex::Regex::new(r#"(?is)<media:thumbnail[^>]+url=["']([^"']+)["']"#).ok();
+    let img_re = regex::Regex::new(r#"(?is)<img[^>]+src=["']([^"']+)["']"#).ok();
+    let desc_re = regex::Regex::new(r"(?is)<description>(.*?)</description>").ok();
+    let pub_re = regex::Regex::new(r"(?is)<pubDate>(.*?)</pubDate>").ok();
+    let cat_re = regex::Regex::new(r"(?is)<category[^>]*>(.*?)</category>").ok();
+
+    let mut results = Vec::new();
+    for caps in item_re.captures_iter(&xml) {
+        let item = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let raw_title = title_re
+            .as_ref()
+            .and_then(|re| re.captures(item))
+            .and_then(|c| c.get(1))
+            .map(|m| strip_cdata(m.as_str()))
+            .map(|s| clean_text(&s))
+            .unwrap_or_default();
+        let href = link_re
+            .as_ref()
+            .and_then(|re| re.captures(item))
+            .and_then(|c| c.get(1))
+            .map(|m| clean_text(m.as_str()))
+            .unwrap_or_default();
+        if raw_title.is_empty() || href.is_empty() {
+            continue;
+        }
+        if href.contains("/feed") || href.contains("/member/") {
+            continue;
+        }
+
+        let desc = desc_re
+            .as_ref()
+            .and_then(|re| re.captures(item))
+            .and_then(|c| c.get(1))
+            .map(|m| html_entity_decode(&strip_cdata(m.as_str())))
+            .unwrap_or_default();
+
+        let cover_url = thumb_re
+            .as_ref()
+            .and_then(|re| re.captures(item).or_else(|| re.captures(&desc)))
+            .and_then(|c| c.get(1))
+            .map(|m| absolutize(m.as_str(), base))
+            .or_else(|| {
+                img_re
+                    .as_ref()
+                    .and_then(|re| re.captures(&desc))
+                    .and_then(|c| c.get(1))
+                    .map(|m| absolutize(m.as_str(), base))
+            });
+
+        let format = capture_labeled(&desc, r"(?is)Format:\s*([A-Za-z0-9]+)");
+        let bitrate = capture_labeled(&desc, r"(?is)Bitrate:\s*([^<\n]+)");
+        let author = capture_labeled(&desc, r"(?is)Written by\s+([^<\n]+)");
+        let (parsed_title, author_from_title) = split_title_author(&raw_title);
+        let author = author.or(author_from_title);
+
+        let posted = pub_re
+            .as_ref()
+            .and_then(|re| re.captures(item))
+            .and_then(|c| c.get(1))
+            .map(|m| clean_text(m.as_str()))
+            .and_then(short_rfc2822);
+
+        let language = cat_re.as_ref().and_then(|re| {
+            re.captures_iter(item)
+                .map(|c| strip_cdata(c.get(1).map(|m| m.as_str()).unwrap_or("")))
+                .map(|s| clean_text(&s))
+                .find(|s| {
+                    matches!(
+                        s.to_ascii_lowercase().as_str(),
+                        "english"
+                            | "german"
+                            | "french"
+                            | "spanish"
+                            | "italian"
+                            | "russian"
+                            | "chinese"
+                            | "japanese"
+                            | "portuguese"
+                            | "dutch"
+                    )
+                })
+        });
+
+        let category = cat_re.as_ref().and_then(|re| {
+            re.captures_iter(item)
+                .map(|c| strip_cdata(c.get(1).map(|m| m.as_str()).unwrap_or("")))
+                .map(|s| clean_text(&s))
+                .find(|s| {
+                    let l = s.to_ascii_lowercase();
+                    !matches!(
+                        l.as_str(),
+                        "english"
+                            | "german"
+                            | "french"
+                            | "spanish"
+                            | "italian"
+                            | "russian"
+                            | "chinese"
+                            | "japanese"
+                            | "portuguese"
+                            | "dutch"
+                    ) && !l.is_empty()
+                })
+        });
+
+        let mut meta_bits = Vec::new();
+        if let Some(f) = format.as_ref() {
+            meta_bits.push(f.clone());
+        }
+        if let Some(b) = bitrate.as_ref() {
+            meta_bits.push(clean_text(b));
+        }
+        if let Some(p) = posted.as_ref() {
+            meta_bits.push(format!("Posted {p}"));
+        }
+        let info = if meta_bits.is_empty() {
+            None
+        } else {
+            Some(meta_bits.join(" · "))
+        };
+
+        results.push(AbbSearchResult {
+            title: parsed_title,
+            url: absolutize(&href, base),
+            cover_url,
+            info,
+            author,
+            language,
+            format: format.map(|s| clean_text(&s)),
+            bitrate: bitrate.map(|s| clean_text(&s)),
+            size: None,
+            posted,
+            category,
+        });
+    }
+    results
+}
+
+fn strip_cdata(s: &str) -> String {
+    let t = s.trim();
+    if let Some(inner) = t
+        .strip_prefix("<![CDATA[")
+        .and_then(|x| x.strip_suffix("]]>"))
+    {
+        inner.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+fn short_rfc2822(s: String) -> Option<String> {
+    // "Tue, 18 Mar 2025 08:23:10 +0000" → "18 Mar 2025"
+    let parts: Vec<_> = s.split_whitespace().collect();
+    if parts.len() >= 4 {
+        Some(format!("{} {} {}", parts[1], parts[2], parts[3]))
+    } else if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn parse_listing(html: &str, base: &str) -> Vec<AbbSearchResult> {
@@ -501,6 +709,7 @@ fn html_entity_decode(s: &str) -> String {
         .replace("&nbsp;", " ")
         .replace("&quot;", "\"")
         .replace("&#039;", "'")
+        .replace("&#8217;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
 }
@@ -579,6 +788,50 @@ mod tests {
             encode_abb_query("sunrise on the reaping"),
             "sunrise+on+the+reaping"
         );
+        // Mixed case must lower — ABB redirects capitalized s= to homepage.
+        assert_eq!(
+            encode_abb_query("Sunrise on the Reaping"),
+            "sunrise+on+the+reaping"
+        );
+        assert_eq!(
+            encode_abb_query("Sunrise on the Reaping:"),
+            "sunrise+on+the+reaping%3a"
+        );
+    }
+
+    #[test]
+    fn parses_rss_search_items() {
+        let xml = r#"<?xml version="1.0"?>
+        <rss><channel>
+          <atom:link href="http://audiobookbay.lu/?s=sunrise+on+the+reaping&amp;feed=rss2" rel="self"/>
+          <item>
+            <title>Sunrise on the Reaping: A Hunger Games Novel - Suzanne Collins</title>
+            <link>https://audiobookbay.lu/abss/example/</link>
+            <description><![CDATA[Written by Suzanne Collins Format: M4B Bitrate: 128 Kbps<br /><img src="https://example.com/c.jpg" />]]></description>
+            <media:thumbnail url="https://example.com/c.jpg"/>
+            <pubDate>Tue, 18 Mar 2025 08:23:10 +0000</pubDate>
+            <category><![CDATA[English]]></category>
+            <category><![CDATA[Fantasy]]></category>
+          </item>
+        </channel></rss>"#;
+        assert!(rss_is_search_feed(xml, "sunrise+on+the+reaping"));
+        let results = parse_rss_feed(xml, "https://audiobookbay.lu");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].title.contains("Sunrise"));
+        assert_eq!(results[0].format.as_deref(), Some("M4B"));
+        assert_eq!(
+            results[0].cover_url.as_deref(),
+            Some("https://example.com/c.jpg")
+        );
+    }
+
+    #[test]
+    fn rejects_homepage_rss_as_search() {
+        let xml = r#"<?xml version="1.0"?><rss><channel>
+          <atom:link href="http://audiobookbay.lu/feed" rel="self"/>
+          <item><title>Final Strike</title><link>https://audiobookbay.lu/abss/x/</link></item>
+        </channel></rss>"#;
+        assert!(!rss_is_search_feed(xml, "sunrise+on+the+reaping"));
     }
 }
 
@@ -590,12 +843,19 @@ mod live_tests {
     #[ignore]
     async fn live_search_matches_abb() {
         let client = AbbClient::new();
-        let page = client.search("sunrise on the reaping", 1).await.expect("search");
+        // Title Case is what users type — must not 301 to homepage.
+        let page = client
+            .search("Sunrise on the Reaping", 1)
+            .await
+            .expect("search");
         let titles: Vec<_> = page.results.iter().map(|r| r.title.clone()).collect();
         eprintln!("mirror={} n={} titles={:?}", page.mirror, titles.len(), titles);
         assert_eq!(page.mode, "search");
         assert!(
-            titles.iter().any(|t| t.to_lowercase().contains("sunrise") && t.to_lowercase().contains("reaping")),
+            titles
+                .iter()
+                .any(|t| t.to_lowercase().contains("sunrise")
+                    && t.to_lowercase().contains("reaping")),
             "expected sunrise book in {:?}",
             titles
         );
@@ -608,11 +868,33 @@ mod live_tests {
 
     #[tokio::test]
     #[ignore]
+    async fn live_search_paginates() {
+        let client = AbbClient::new();
+        let p1 = client.search("hunger games", 1).await.expect("p1");
+        let p2 = client.search("hunger games", 2).await.expect("p2");
+        assert!(!p1.results.is_empty());
+        assert!(!p2.results.is_empty());
+        assert_ne!(
+            p1.results[0].url, p2.results[0].url,
+            "page 2 should differ from page 1"
+        );
+        eprintln!(
+            "p1={} p2={}",
+            p1.results[0].title, p2.results[0].title
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn live_latest_feed() {
         let client = AbbClient::new();
         let page = client.latest(1).await.expect("latest");
         assert_eq!(page.mode, "latest");
         assert!(!page.results.is_empty());
-        eprintln!("latest n={} first={}", page.results.len(), page.results[0].title);
+        eprintln!(
+            "latest n={} first={}",
+            page.results.len(),
+            page.results[0].title
+        );
     }
 }

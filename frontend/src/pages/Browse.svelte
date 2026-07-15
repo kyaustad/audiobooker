@@ -65,9 +65,12 @@
       page = data.page ?? 1
       hasMore = Boolean(data.has_more)
       mirror = data.mirror ?? null
-      mode = (data.mode as Mode) || nextMode
+      mode = nextMode
       if (!results.length) {
-        error = nextMode === 'search' ? 'No results found for that search.' : 'No recent listings available.'
+        error =
+          nextMode === 'search'
+            ? 'No AudiobookBay results for that search. Try fewer words or quotes for an exact title.'
+            : 'No recent listings available.'
       }
     } catch (err) {
       results = []

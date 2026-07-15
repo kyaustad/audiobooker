@@ -27,7 +27,7 @@ WORKDIR /app
 COPY --from=backend /app/target/release/audiobooker /app/audiobooker
 COPY --from=frontend /frontend/dist /app/static
 
-RUN mkdir -p /data /downloads /audiobooks
+RUN mkdir -p /data
 
 ENV HOST=0.0.0.0
 ENV PORT=3000

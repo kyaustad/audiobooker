@@ -10,13 +10,32 @@
   let saving = $state(false)
   let testing = $state(false)
   let libraries = $state<Library[]>([])
+  let drafts = $state<Record<number, { name: string; path: string }>>({})
+  let savingLib = $state<number | null>(null)
   let newName = $state('')
   let newPath = $state('')
   let syncing = $state(false)
 
+  function needsPath(path: string) {
+    const p = path.trim()
+    return !p || p.startsWith('__unset__')
+  }
+
+  function syncDrafts(libs: Library[]) {
+    const next: Record<number, { name: string; path: string }> = {}
+    for (const lib of libs) {
+      next[lib.id] = {
+        name: lib.name,
+        path: needsPath(lib.path) ? '' : lib.path,
+      }
+    }
+    drafts = next
+  }
+
   async function refreshLibraries() {
     const data = await api.listLibraries()
     libraries = data.libraries
+    syncDrafts(data.libraries)
   }
 
   onMount(async () => {
@@ -83,6 +102,24 @@
     }
   }
 
+  async function saveLibrary(lib: Library) {
+    const draft = drafts[lib.id]
+    if (!draft?.name.trim() || !draft.path.trim()) {
+      showToast('Name and container path are required')
+      return
+    }
+    savingLib = lib.id
+    try {
+      await api.updateLibrary(lib.id, draft.name.trim(), draft.path.trim())
+      await refreshLibraries()
+      showToast(`Saved ${draft.name.trim()}`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to save library')
+    } finally {
+      savingLib = null
+    }
+  }
+
   async function removeLibrary(id: number) {
     try {
       await api.deleteLibrary(id)
@@ -101,7 +138,13 @@
         audiobookshelf_token: absToken || undefined,
       })
       libraries = data.libraries
-      showToast(`Synced ${data.imported} libraries from Audiobookshelf`)
+      syncDrafts(data.libraries)
+      const pending = data.needs_path ?? data.libraries.filter((l) => needsPath(l.path)).length
+      if (pending > 0) {
+        showToast(`Synced ${data.imported} libraries — set container paths for ${pending}`)
+      } else {
+        showToast(`Synced ${data.imported} libraries from Audiobookshelf`)
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'ABS sync failed')
     } finally {
@@ -137,9 +180,12 @@
         <input bind:value={settings.download_path} />
       </label>
       <label>Fallback library path
-        <input bind:value={settings.library_path} />
+        <input bind:value={settings.library_path} placeholder="optional" />
       </label>
     </div>
+    <p class="muted" style="margin:0">
+      Fallback is only used when a download has no library assigned. Prefer per-library paths below.
+    </p>
     <label>Path template
       <input bind:value={settings.path_template} />
     </label>
@@ -158,7 +204,7 @@
     <div>
       <h3 style="margin:0.5rem 0 0.25rem">Audiobookshelf</h3>
       <p class="muted" style="margin:0">
-        Optional API connection to import library folders. Paths must match this container’s mounts.
+        Sync imports library names from ABS. Container paths are assigned here — ABS folder paths are only a hint.
       </p>
     </div>
     <div class="row">
@@ -185,30 +231,96 @@
     <div>
       <h2>Libraries</h2>
       <p class="muted">
-        Each entry is an Audiobookshelf library folder mounted into this container. Assign them to users under Users.
+        Add volume mounts for your library folders on the container, then put those
+        <strong>container</strong> paths here. ABS sync brings in library names only — it never overwrites paths you set.
       </p>
     </div>
     <form class="row" onsubmit={addLibrary}>
       <label>Name
-        <input bind:value={newName} required placeholder="Fiction" />
+        <input bind:value={newName} required placeholder="Audiobooks" />
       </label>
       <label>Container path
-        <input bind:value={newPath} required placeholder="/audiobooks/fiction" />
+        <input bind:value={newPath} required placeholder="/media/audiobooks" />
       </label>
       <button type="submit">Add</button>
     </form>
-    <div class="stack">
+    <div class="stack lib-list">
       {#each libraries as lib}
-        <div class="row" style="justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:0.55rem">
-          <div>
-            <strong>{lib.name}</strong>
-            <div class="muted">{lib.path}</div>
+        {@const draft = drafts[lib.id]}
+        <div class="lib-row" class:needs-path={needsPath(lib.path)}>
+          <div class="row lib-fields">
+            <label>Name
+              <input
+                value={draft?.name ?? lib.name}
+                oninput={(e) => {
+                  drafts[lib.id] = {
+                    name: (e.currentTarget as HTMLInputElement).value,
+                    path: drafts[lib.id]?.path ?? '',
+                  }
+                }}
+              />
+            </label>
+            <label>Container path
+              <input
+                value={draft?.path ?? ''}
+                placeholder={lib.abs_path ? `ABS reports ${lib.abs_path}` : '/path/in/container'}
+                oninput={(e) => {
+                  drafts[lib.id] = {
+                    name: drafts[lib.id]?.name ?? lib.name,
+                    path: (e.currentTarget as HTMLInputElement).value,
+                  }
+                }}
+              />
+            </label>
           </div>
-          <button class="danger" type="button" onclick={() => removeLibrary(lib.id)}>Remove</button>
+          {#if lib.abs_path}
+            <p class="muted abs-hint">ABS folder: {lib.abs_path}</p>
+          {/if}
+          {#if needsPath(lib.path)}
+            <p class="warn">Set the container mount path before imports can use this library.</p>
+          {/if}
+          <div class="row lib-actions">
+            <button type="button" disabled={savingLib === lib.id} onclick={() => saveLibrary(lib)}>
+              {savingLib === lib.id ? 'Saving…' : 'Save'}
+            </button>
+            <button class="danger" type="button" onclick={() => removeLibrary(lib.id)}>Remove</button>
+          </div>
         </div>
       {:else}
-        <p class="muted">No libraries yet.</p>
+        <p class="muted">No libraries yet — sync from ABS or add one manually.</p>
       {/each}
     </div>
   </div>
 {/if}
+
+<style>
+  .lib-list {
+    gap: 0.85rem;
+  }
+  .lib-row {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+  .lib-row.needs-path {
+    border-color: color-mix(in oklab, #c45c26 55%, var(--border));
+  }
+  .lib-fields {
+    align-items: end;
+  }
+  .lib-actions {
+    justify-content: flex-end;
+  }
+  .abs-hint {
+    margin: 0;
+    font-size: 0.85rem;
+  }
+  .warn {
+    margin: 0;
+    font-size: 0.88rem;
+    color: #c45c26;
+  }
+</style>

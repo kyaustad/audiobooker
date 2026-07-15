@@ -108,9 +108,20 @@ impl From<Settings> for SettingsPublic {
 pub struct Library {
     pub id: i64,
     pub name: String,
+    /// Writable root path inside the Audiobooker container.
     pub path: String,
     pub abs_id: Option<String>,
+    /// Path reported by Audiobookshelf (informational; may not exist here).
+    pub abs_path: Option<String>,
     pub created_at: String,
+}
+
+impl Library {
+    /// Placeholder until an admin sets the container mount path.
+    pub fn path_needs_config(path: &str) -> bool {
+        let p = path.trim();
+        p.is_empty() || p.starts_with("__unset__")
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]

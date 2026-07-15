@@ -13,10 +13,10 @@ AudiobookBay → Audiobooker → qBittorrent → copy Author/Series/Book → Aud
 ## Workflow
 
 1. First boot → create **root** admin (optional qBittorrent test)
-2. Root configures **qBittorrent** + library paths in **Settings**
-3. Root creates **users** (temporary passwords)
+2. Root configures **qBittorrent**, mounts library shares into the container, and assigns each ABS library a **container path** in **Settings**
+3. Root creates **users** (temporary passwords) and grants library access
 4. Users add magnets/hashes (or browse AudiobookBay), **match Audible metadata**, then download
-5. On completion, files are **copied** into `Author/Series/Title` for Audiobookshelf
+5. On completion, files are **copied** into that library’s path as `Author/Series/Title` for Audiobookshelf
 6. Optional PWA push when a book is imported
 
 ## Docker (recommended)
@@ -46,70 +46,69 @@ Or pull the published image without building:
 image: ghcr.io/kyaustad/audiobooker:latest
 ```
 
-Open `http://server:3000`, complete root setup, then finish qBittorrent + paths under **Settings**.
+Open `http://server:3000`, complete root setup, then finish qBittorrent + library paths under **Settings**.
 
 ### Volumes
 
-| Container path | Purpose | Host tip (Unraid) |
-|----------------|---------|-------------------|
-| `/data` | SQLite DB + app state | e.g. `/mnt/user/appdata/audiobooker` |
-| `/downloads` | Completed torrent files (read-only OK) | Same share qBittorrent writes to |
-| `/audiobooks` | Library root Audiobookshelf reads | Your ABS library share |
+The image only requires **`/data`** (SQLite + app state). Everything else is mounts **you** add.
 
-`docker-compose.yml` defaults:
+1. Mount qBittorrent’s completed-downloads folder somewhere in the container
+2. Mount each ABS library folder somewhere in the container
+3. In **Settings**, set Download path + each library’s container path to those mount points
 
-| Env var | Default | Maps to |
+```yaml
+volumes:
+  - ./data:/data
+  # you choose the container paths:
+  - /mnt/user/downloads:/downloads:ro
+  - /opt/media/audiobooks:/audiobooks
+  - /opt/media/adultaudio:/adultaudio
+```
+
+Then assign `/audiobooks` and `/adultaudio` (or whatever you mounted) on each library in Settings. ABS sync imports library **names** only; it does **not** overwrite paths you set.
+
+| Env var | Default | Purpose |
 |---------|---------|---------|
-| `TORRENT_DOWNLOADS_PATH` | `/mnt/user/downloads` | → `/downloads` |
-| `AUDIOBOOK_LIBRARY_PATH` | `/mnt/user/audiobooks` | → `/audiobooks` |
+| `APPDATA_PATH` | `./data` | → `/data` |
 | `HOST_PORT` | `3000` | host port → `3000` |
 | `COOKIE_SECURE` | `false` | set `true` only behind HTTPS |
 | `PUID` / `PGID` | `0` / `0` | optional non-root user |
 
 ### Settings paths (important)
 
-In the UI, set paths **as the container sees them**, not host paths:
+Paths in the UI must be **as this container sees them** (your volume targets), not host paths.
 
-| Setting | Typical value |
-|---------|----------------|
-| Download path | `/downloads` |
-| Library path | `/audiobooks` |
-| qBittorrent URL | `http://qbittorrent:8080` or LAN IP of the WebUI |
-
-Audiobooker copies from the path qBittorrent reports. If qBit uses a different in-container path (e.g. `/mnt/user/downloads`), set **Download path** to `/downloads` so Audiobooker can remap using the torrent’s save path.
-
-**Best setup:** mount the same host folder into both containers at the **same** container path (`/downloads`).
+Audiobooker copies from the path qBittorrent reports. If that path doesn’t exist in this container, set **Download path** to your downloads mount so it can remap using the torrent’s save path. Best: mount the same host folder into qBit and Audiobooker at the **same** container path.
 
 ### Permissions
 
 - Default: container runs as root (`PUID=0`), which avoids write failures on first boot.
 - On Unraid, Audiobookshelf may not read root-owned imports. Either:
   - set `PUID=99` and `PGID=100` (common Unraid share ownership), **and** `chown -R 99:100` your `./data` (or appdata) folder before start, or
-  - leave root and run a periodic New Permissions / `chown` on the library share.
+  - leave root and run a periodic New Permissions / `chown` on the library shares.
 - `/data` must be writable by the container user or the DB cannot be created.
-- `/audiobooks` must be writable or imports fail after download completes.
-- `/downloads` can be `:ro` if you only copy out of it.
+- Library mounts must be writable or imports fail after download completes.
+- Downloads can be `:ro` if you only copy out of them.
 
 ### Unraid (Docker UI)
 
 1. Repository: `ghcr.io/kyaustad/audiobooker:latest`
 2. Port: `3000` → host of your choice
-3. Paths:
-   - `/data` → `appdata/audiobooker`
-   - `/downloads` → your qBittorrent completed folder (**same share**)
-   - `/audiobooks` → Audiobookshelf library
-4. Extra: `COOKIE_SECURE=false` on HTTP LAN; `true` if reverse-proxied with TLS
-5. Optional: `PUID` / `PGID` matching the share
+3. Path: `/data` → `appdata/audiobooker` (required)
+4. Add path mappings for downloads + each ABS library share (any container paths you want)
+5. In Settings, set Download path and each library’s container path to those mounts
+6. Extra: `COOKIE_SECURE=false` on HTTP LAN; `true` if reverse-proxied with TLS
+7. Optional: `PUID` / `PGID` matching the share
 
 If GHCR asks to log in for a public image, make sure the package visibility is **public** (Actions sets this after the first successful publish; you can also change it under the package settings on GitHub).
-
 ## Common snags
 
 | Symptom | Likely cause |
 |---------|----------------|
 | Redirected to login forever / session lost | Serving over HTTP with `COOKIE_SECURE=true` — set `false` on plain HTTP |
-| “Source path does not exist” after complete | `/downloads` not mapped to the same files qBit finished, or Settings → Download path wrong |
+| “Source path does not exist” after complete | Downloads share not mounted into this container, or Settings → Download path wrong |
 | Import permission denied | Library mount not writable by container user (PUID/PGID / root ownership) |
+| Library has no container path | Mount the library folder, then set its path under Settings → Libraries |
 | qBittorrent connection test fails | Wrong WebUI URL from inside Docker (`localhost` is the Audiobooker container). Use bridge DNS name or host LAN IP; enable WebUI auth if required |
 | Can’t pull from GHCR | Package still private — open the package on GitHub → Package settings → Change visibility → Public |
 | AudiobookBay browse empty / pagination odd | Mirrors/layout change; try a broader query. Narrow searches may only have one page |

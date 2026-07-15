@@ -5,7 +5,7 @@ use chrono::Utc;
 use sqlx::SqlitePool;
 
 use crate::files::{build_library_relative_path, copy_completed, resolve_download_source};
-use crate::models::{BookMetadata, BookMetadataPublic, Download, Settings};
+use crate::models::{BookMetadata, BookMetadataPublic, Download, Library, Settings};
 use crate::push::{PushPayload, ensure_vapid_keys, notify_user};
 use crate::qbittorrent::{QbittorrentClient, map_state};
 
@@ -244,8 +244,28 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
             .bind(lib_id)
             .fetch_optional(pool)
             .await?;
-        row.map(|r| r.0)
-            .unwrap_or_else(|| settings.library_path.clone())
+        match row.map(|r| r.0) {
+            Some(path) if Library::path_needs_config(&path) => {
+                sqlx::query(
+                    r#"
+                    UPDATE downloads SET
+                        status = 'error',
+                        error_message = ?,
+                        updated_at = datetime('now')
+                    WHERE id = ?
+                    "#,
+                )
+                .bind(
+                    "Library has no container path set. Open Settings → Libraries and assign the mount path for this library.",
+                )
+                .bind(download_id)
+                .execute(pool)
+                .await?;
+                return Ok(());
+            }
+            Some(path) => path,
+            None => settings.library_path.clone(),
+        }
     } else {
         settings.library_path.clone()
     };

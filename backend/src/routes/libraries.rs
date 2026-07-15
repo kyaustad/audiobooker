@@ -10,6 +10,9 @@ use crate::error::{AppError, AppResult};
 use crate::models::{Library, Settings};
 use crate::state::AppState;
 
+const LIBRARY_SELECT: &str =
+    "SELECT id, name, path, abs_id, abs_path, created_at FROM libraries";
+
 #[derive(Deserialize)]
 pub struct UpsertLibraryRequest {
     pub name: String,
@@ -23,13 +26,29 @@ pub struct SyncAbsRequest {
     pub audiobookshelf_token: Option<String>,
 }
 
+fn unset_path_for(abs_id: &str, name: &str) -> String {
+    if !abs_id.is_empty() {
+        format!("__unset__/{abs_id}")
+    } else {
+        let slug: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        format!("__unset__/{slug}")
+    }
+}
+
 pub async fn list_all(State(state): State<AppState>, auth: AuthSession) -> AppResult<Json<Value>> {
     auth.require_root()?;
-    let libraries = sqlx::query_as::<_, Library>(
-        "SELECT id, name, path, abs_id, created_at FROM libraries ORDER BY name",
-    )
-    .fetch_all(&state.pool)
-    .await?;
+    let libraries = sqlx::query_as::<_, Library>(&format!("{LIBRARY_SELECT} ORDER BY name"))
+        .fetch_all(&state.pool)
+        .await?;
     Ok(Json(json!({ "libraries": libraries })))
 }
 
@@ -42,7 +61,7 @@ pub async fn list_for_me(
     }
     let libraries = sqlx::query_as::<_, Library>(
         r#"
-        SELECT l.id, l.name, l.path, l.abs_id, l.created_at
+        SELECT l.id, l.name, l.path, l.abs_id, l.abs_path, l.created_at
         FROM libraries l
         INNER JOIN user_libraries ul ON ul.library_id = l.id
         WHERE ul.user_id = ?
@@ -66,6 +85,11 @@ pub async fn create(
     if name.is_empty() || path.is_empty() {
         return Err(AppError::BadRequest("Name and path are required".into()));
     }
+    if Library::path_needs_config(&path) {
+        return Err(AppError::BadRequest(
+            "Set a real container path (the mount point inside this container)".into(),
+        ));
+    }
     let result = sqlx::query(
         "INSERT INTO libraries (name, path, abs_id) VALUES (?, ?, ?)",
     )
@@ -82,12 +106,10 @@ pub async fn create(
         }
     })?;
 
-    let library = sqlx::query_as::<_, Library>(
-        "SELECT id, name, path, abs_id, created_at FROM libraries WHERE id = ?",
-    )
-    .bind(result.last_insert_rowid())
-    .fetch_one(&state.pool)
-    .await?;
+    let library = sqlx::query_as::<_, Library>(&format!("{LIBRARY_SELECT} WHERE id = ?"))
+        .bind(result.last_insert_rowid())
+        .fetch_one(&state.pool)
+        .await?;
     Ok(Json(json!({ "library": library })))
 }
 
@@ -103,24 +125,43 @@ pub async fn update(
     if name.is_empty() || path.is_empty() {
         return Err(AppError::BadRequest("Name and path are required".into()));
     }
+    if Library::path_needs_config(&path) {
+        return Err(AppError::BadRequest(
+            "Set a real container path (the mount point inside this container)".into(),
+        ));
+    }
+
+    let existing = sqlx::query_as::<_, Library>(&format!("{LIBRARY_SELECT} WHERE id = ?"))
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let abs_id = body.abs_id.or(existing.abs_id);
+
     let result = sqlx::query(
         "UPDATE libraries SET name = ?, path = ?, abs_id = ? WHERE id = ?",
     )
     .bind(&name)
     .bind(&path)
-    .bind(body.abs_id.as_deref())
+    .bind(abs_id.as_deref())
     .bind(id)
     .execute(&state.pool)
-    .await?;
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            AppError::Conflict("Library name or path already exists".into())
+        } else {
+            AppError::from(e)
+        }
+    })?;
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    let library = sqlx::query_as::<_, Library>(
-        "SELECT id, name, path, abs_id, created_at FROM libraries WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
+    let library = sqlx::query_as::<_, Library>(&format!("{LIBRARY_SELECT} WHERE id = ?"))
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
     Ok(Json(json!({ "library": library })))
 }
 
@@ -145,7 +186,8 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Pull library folders from Audiobookshelf and upsert by abs_id/name.
+/// Pull library names / ABS IDs from Audiobookshelf.
+/// Does **not** overwrite configured container paths — those are set in Settings.
 pub async fn sync_from_abs(
     State(state): State<AppState>,
     auth: AuthSession,
@@ -197,6 +239,8 @@ pub async fn sync_from_abs(
         .unwrap_or_default();
 
     let mut imported = 0usize;
+    let mut needs_path = 0usize;
+
     for lib in libs {
         let abs_id = lib.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let name = lib
@@ -204,7 +248,7 @@ pub async fn sync_from_abs(
             .and_then(|v| v.as_str())
             .unwrap_or("Library")
             .to_string();
-        let folder_path = lib
+        let abs_folder = lib
             .get("folderPath")
             .or_else(|| {
                 lib.get("folders")
@@ -217,67 +261,73 @@ pub async fn sync_from_abs(
             .trim()
             .trim_end_matches('/')
             .to_string();
+        let abs_folder_opt = if abs_folder.is_empty() {
+            None
+        } else {
+            Some(abs_folder.as_str())
+        };
 
-        if folder_path.is_empty() {
-            continue;
-        }
-
-        // Prefer update by abs_id, else insert; skip Unique collisions on path.
-        if !abs_id.is_empty() {
-            let existing: Option<(i64,)> =
-                sqlx::query_as("SELECT id FROM libraries WHERE abs_id = ?")
-                    .bind(abs_id)
-                    .fetch_optional(&state.pool)
-                    .await?;
-            if let Some((id,)) = existing {
-                sqlx::query("UPDATE libraries SET name = ?, path = ? WHERE id = ?")
+        // Prefer match by abs_id, then by exact name (legacy rows without abs_id).
+        let existing: Option<Library> = if !abs_id.is_empty() {
+            sqlx::query_as::<_, Library>(&format!("{LIBRARY_SELECT} WHERE abs_id = ?"))
+                .bind(abs_id)
+                .fetch_optional(&state.pool)
+                .await?
+        } else {
+            None
+        };
+        let existing = match existing {
+            Some(row) => Some(row),
+            None => {
+                sqlx::query_as::<_, Library>(&format!("{LIBRARY_SELECT} WHERE name = ?"))
                     .bind(&name)
-                    .bind(&folder_path)
-                    .bind(id)
-                    .execute(&state.pool)
-                    .await?;
-                imported += 1;
-                continue;
+                    .fetch_optional(&state.pool)
+                    .await?
             }
-        }
+        };
 
-        let by_path: Option<(i64,)> = sqlx::query_as("SELECT id FROM libraries WHERE path = ?")
-            .bind(&folder_path)
-            .fetch_optional(&state.pool)
+        if let Some(row) = existing {
+            sqlx::query(
+                "UPDATE libraries SET name = ?, abs_id = ?, abs_path = ? WHERE id = ?",
+            )
+            .bind(&name)
+            .bind(if abs_id.is_empty() {
+                row.abs_id.as_deref()
+            } else {
+                Some(abs_id)
+            })
+            .bind(abs_folder_opt.or(row.abs_path.as_deref()))
+            .bind(row.id)
+            .execute(&state.pool)
             .await?;
-        if let Some((id,)) = by_path {
-            sqlx::query("UPDATE libraries SET name = ?, abs_id = ? WHERE id = ?")
-                .bind(&name)
-                .bind(if abs_id.is_empty() {
-                    None
-                } else {
-                    Some(abs_id)
-                })
-                .bind(id)
-                .execute(&state.pool)
-                .await?;
+            if Library::path_needs_config(&row.path) {
+                needs_path += 1;
+            }
             imported += 1;
             continue;
         }
 
+        // New library: placeholder container path until admin assigns a mount.
+        let provisional = unset_path_for(abs_id, &name);
         let res = sqlx::query(
-            "INSERT INTO libraries (name, path, abs_id) VALUES (?, ?, ?)",
+            "INSERT INTO libraries (name, path, abs_id, abs_path) VALUES (?, ?, ?, ?)",
         )
         .bind(&name)
-        .bind(&folder_path)
+        .bind(&provisional)
         .bind(if abs_id.is_empty() {
             None
         } else {
             Some(abs_id)
         })
+        .bind(abs_folder_opt)
         .execute(&state.pool)
         .await;
         if res.is_ok() {
             imported += 1;
+            needs_path += 1;
         }
     }
 
-    // Persist credentials used for sync when provided
     if body.audiobookshelf_url.as_deref().is_some_and(|s| !s.trim().is_empty())
         || body
             .audiobookshelf_token
@@ -301,14 +351,13 @@ pub async fn sync_from_abs(
         .await?;
     }
 
-    let libraries = sqlx::query_as::<_, Library>(
-        "SELECT id, name, path, abs_id, created_at FROM libraries ORDER BY name",
-    )
-    .fetch_all(&state.pool)
-    .await?;
+    let libraries = sqlx::query_as::<_, Library>(&format!("{LIBRARY_SELECT} ORDER BY name"))
+        .fetch_all(&state.pool)
+        .await?;
 
     Ok(Json(json!({
         "imported": imported,
+        "needs_path": needs_path,
         "libraries": libraries
     })))
 }
