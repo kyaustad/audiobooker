@@ -182,6 +182,132 @@ pub async fn copy_completed(
     Ok(destination)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContentEntry {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: i64,
+}
+
+/// Build a browseable list of relative paths from qBit file names (files only)
+/// plus inferred parent directories.
+pub fn entries_from_qb_paths(paths: &[(String, i64)]) -> Vec<ContentEntry> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut files: BTreeMap<String, i64> = BTreeMap::new();
+    let mut dirs: BTreeSet<String> = BTreeSet::new();
+    for (name, size) in paths {
+        let clean = name.trim_start_matches('/').replace('\\', "/");
+        if clean.is_empty() {
+            continue;
+        }
+        files.insert(clean.clone(), *size);
+        let mut acc = String::new();
+        let parts: Vec<_> = clean.split('/').collect();
+        for (i, part) in parts.iter().enumerate() {
+            if i + 1 == parts.len() {
+                break;
+            }
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(part);
+            dirs.insert(acc.clone());
+        }
+    }
+    let mut out = Vec::new();
+    for d in dirs {
+        let name = d.rsplit('/').next().unwrap_or(&d).to_string();
+        out.push(ContentEntry {
+            path: d,
+            name,
+            is_dir: true,
+            size: 0,
+        });
+    }
+    for (path, size) in files {
+        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        out.push(ContentEntry {
+            path: path.clone(),
+            name,
+            is_dir: false,
+            size,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
+    out
+}
+
+pub async fn entries_from_disk(root: &Path) -> AppResult<Vec<ContentEntry>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    collect_disk(root, root, &mut out, 0).await?;
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
+    Ok(out)
+}
+
+async fn collect_disk(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<ContentEntry>,
+    depth: usize,
+) -> AppResult<()> {
+    if depth > 8 {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(current)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+    {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.is_empty() {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if file_type.is_dir() {
+            out.push(ContentEntry {
+                path: rel,
+                name,
+                is_dir: true,
+                size: 0,
+            });
+            Box::pin(collect_disk(root, &path, out, depth + 1)).await?;
+        } else {
+            let size = fs::metadata(&path).await.map(|m| m.len() as i64).unwrap_or(0);
+            out.push(ContentEntry {
+                path: rel,
+                name,
+                is_dir: false,
+                size,
+            });
+        }
+    }
+    Ok(())
+}
+
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
     fs::create_dir_all(dst)
         .await

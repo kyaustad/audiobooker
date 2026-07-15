@@ -795,7 +795,7 @@ mod tests {
         );
         assert_eq!(
             encode_abb_query("Sunrise on the Reaping:"),
-            "sunrise+on+the+reaping%3a"
+            "sunrise+on+the+reaping%3A"
         );
     }
 

@@ -6,6 +6,9 @@
 
   let { params = { id: '' } }: { params?: { id: string } } = $props()
 
+  type Kind = 'single' | 'pack' | null
+
+  let kind = $state<Kind>(null)
   let title = $state('')
   let author = $state('')
   let asin = $state('')
@@ -16,6 +19,7 @@
   let displayName = $state<string | null>(null)
   let libraries = $state<Library[]>([])
   let libraryId = $state<number | null>(null)
+  let downloadKind = $state('single')
 
   function parseName(name: string | null | undefined) {
     if (!name) return { title: '', author: '' }
@@ -41,16 +45,27 @@
       else if (data.download.library_id) libraryId = data.download.library_id
 
       displayName = data.download.name
+      downloadKind = data.download.kind || 'single'
+      if (downloadKind === 'pack' && data.download.status !== 'awaiting_match') {
+        push(`/map/${params.id}`)
+        return
+      }
+      if (downloadKind === 'pack') kind = 'pack'
+
       const parsed = parseName(data.download.name)
       title = parsed.title
       author = parsed.author
-      if (title) await search()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not load download')
     } finally {
       loading = false
     }
   })
+
+  async function chooseSingle() {
+    kind = 'single'
+    if (title) await search()
+  }
 
   async function search(e?: Event) {
     e?.preventDefault()
@@ -82,11 +97,7 @@
     }
     saving = true
     try {
-      await api.matchDownload(
-        Number(params.id),
-        m,
-        libraryId ?? undefined,
-      )
+      await api.matchDownload(Number(params.id), m, libraryId ?? undefined)
       showToast('Matched and sent to qBittorrent')
       push('/')
     } catch (err) {
@@ -95,10 +106,67 @@
       saving = false
     }
   }
+
+  async function startPack() {
+    saving = true
+    try {
+      await api.startPack(Number(params.id))
+      showToast('Pack downloading — map books once files appear')
+      push(`/map/${params.id}`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not start pack')
+    } finally {
+      saving = false
+    }
+  }
 </script>
 
 {#if loading}
   <div class="card muted">Loading match…</div>
+{:else if kind === null}
+  <div class="card stack">
+    <div>
+      <h2>How should this torrent be handled?</h2>
+      <p class="muted">
+        {#if displayName}
+          <strong>{displayName}</strong> —
+        {/if}
+        Single books match one Audible title before download. Packs / collections download first, then you map folders to Audible titles.
+      </p>
+    </div>
+    <div class="kind-grid">
+      <button type="button" class="kind-card" disabled={libraries.length === 0} onclick={chooseSingle}>
+        <strong>Single book</strong>
+        <span class="muted">Match Audible → download → import whole torrent</span>
+      </button>
+      <button type="button" class="kind-card" disabled={libraries.length === 0} onclick={() => (kind = 'pack')}>
+        <strong>Pack / collection</strong>
+        <span class="muted">Download now → map each folder/file to Audible</span>
+      </button>
+    </div>
+    {#if libraries.length === 0}
+      <div class="banner-warn">No libraries assigned to your account. Ask an admin to grant access.</div>
+    {/if}
+  </div>
+{:else if kind === 'pack'}
+  <div class="card stack">
+    <div>
+      <h2>Pack / collection</h2>
+      <p class="muted">
+        Starts the torrent in qBittorrent without an Audible match. After files are available, open
+        <strong>Map books</strong> to assign each folder (or file) to an Audible title and library.
+      </p>
+    </div>
+    {#if libraries.length === 0}
+      <div class="banner-warn">No libraries assigned to your account.</div>
+    {/if}
+    <div class="row">
+      <button type="button" disabled={saving || libraries.length === 0} onclick={startPack}>
+        {saving ? 'Starting…' : 'Start pack download'}
+      </button>
+      <button class="secondary" type="button" disabled={saving} onclick={() => (kind = null)}>Back</button>
+    </div>
+  </div>
 {:else}
   <div class="card stack">
     <div>
@@ -109,6 +177,7 @@
           Prefilling from <strong>{displayName}</strong>.
         {/if}
       </p>
+      <button class="linkish" type="button" onclick={() => (kind = null)}>Change to pack / collection</button>
     </div>
 
     {#if libraries.length === 0}
@@ -180,5 +249,33 @@
     border-radius: var(--radius);
     padding: 0.75rem 0.9rem;
     background: var(--bg);
+  }
+  .kind-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+  }
+  .kind-card {
+    display: grid;
+    gap: 0.35rem;
+    text-align: left;
+    padding: 1rem !important;
+    background: var(--bg) !important;
+    color: var(--text) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius);
+    font-weight: 400;
+  }
+  .kind-card:hover:not(:disabled) {
+    border-color: var(--accent) !important;
+  }
+  .linkish {
+    background: none !important;
+    border: none !important;
+    color: var(--accent) !important;
+    padding: 0 !important;
+    margin-top: 0.35rem;
+    font-weight: 600;
+    cursor: pointer;
   }
 </style>

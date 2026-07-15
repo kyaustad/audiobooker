@@ -193,8 +193,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 1px solid var(--border);
 }
 .badge.downloading, .badge.queued, .badge.copying { color: var(--accent); }
-.badge.imported, .badge.completed { color: var(--success); }
-.badge.error, .badge.awaiting_match { color: var(--warning); }
+.badge.imported, .badge.completed, .badge.partial { color: var(--success); }
+.badge.error, .badge.awaiting_match, .badge.awaiting_map { color: var(--warning); }
+.badge.pack { color: var(--accent); }
 
 .progress {
   height: 6px;

@@ -22,17 +22,32 @@
   let removingId = $state<number | null>(null)
   let timer: number | undefined
 
-  const SEEDING_STATUSES = new Set(['completed', 'copying', 'imported'])
+  const SEEDING_STATUSES = new Set(['completed', 'copying', 'imported', 'awaiting_map', 'partial'])
 
   function tabFor(status: string): Tab {
-    if (status === 'awaiting_match') return 'matching'
+    if (status === 'awaiting_match' || status === 'awaiting_map') return 'matching'
     if (status === 'error') return 'failed'
-    if (SEEDING_STATUSES.has(status) || status === 'completed') return 'completed'
+    if (status === 'imported' || status === 'partial' || status === 'completed' || status === 'copying') {
+      return 'completed'
+    }
     return 'active'
   }
 
   function canRemove(d: Download) {
-    return !SEEDING_STATUSES.has(d.status)
+    if (SEEDING_STATUSES.has(d.status)) return false
+    if ((d.items || []).some((i) => i.status === 'imported')) return false
+    return true
+  }
+
+  function isPack(d: Download) {
+    return (d.kind || 'single') === 'pack'
+  }
+
+  function packProgress(d: Download) {
+    const items = d.items || []
+    if (!items.length) return null
+    const imported = items.filter((i) => i.status === 'imported').length
+    return `${imported}/${items.length} mapped books imported`
   }
 
   const counts = $derived({
@@ -262,11 +277,17 @@
             {/if}
             <div style="margin:0.45rem 0">
               <span class={`badge ${d.status}`}>{statusLabel(d.status)}</span>
+              {#if isPack(d)}
+                <span class="badge pack">pack</span>
+              {/if}
             </div>
             <div class="progress"><span style={`width:${Math.round(d.progress * 100)}%`}></span></div>
             <div class="muted" style="margin-top:0.35rem">
               {Math.round(d.progress * 100)}% · {formatBytes(d.download_speed)}
             </div>
+            {#if packProgress(d)}
+              <div class="muted">{packProgress(d)}</div>
+            {/if}
             {#if d.destination_path}
               <div class="muted">Imported to {d.destination_path}</div>
             {/if}
@@ -308,6 +329,8 @@
           <div class="actions stack">
             {#if d.status === 'awaiting_match'}
               <a class="btn" href={`#/match/${d.id}`}>Match</a>
+            {:else if isPack(d) && ['queued', 'downloading', 'completed', 'awaiting_map', 'partial'].includes(d.status)}
+              <a class="btn" href={`#/map/${d.id}`}>Map books</a>
             {/if}
             {#if canRemove(d)}
               {#if confirmId !== d.id}

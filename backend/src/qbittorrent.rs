@@ -16,6 +16,13 @@ pub struct QbTorrent {
     pub content_path: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct QbTorrentFile {
+    pub name: String,
+    #[serde(default)]
+    pub size: i64,
+}
+
 #[derive(Clone)]
 pub struct QbittorrentClient {
     http: Client,
@@ -142,6 +149,34 @@ impl QbittorrentClient {
         if !resp.status().is_success() {
             return Err(AppError::Internal(format!(
                 "Failed to fetch torrents ({})",
+                resp.status()
+            )));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn torrent_files(
+        &self,
+        base: &str,
+        username: &str,
+        password: &str,
+        hash: &str,
+    ) -> AppResult<Vec<QbTorrentFile>> {
+        let cookie = self.login_cookie(base, username, password).await?;
+        let url = format!(
+            "{}/api/v2/torrents/files?hash={}",
+            base.trim_end_matches('/'),
+            urlencoding::encode(hash)
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("Cookie", &cookie)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(AppError::Internal(format!(
+                "Failed to fetch torrent files ({})",
                 resp.status()
             )));
         }

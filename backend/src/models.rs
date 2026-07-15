@@ -140,6 +140,7 @@ pub struct Download {
     pub destination_path: Option<String>,
     pub error_message: Option<String>,
     pub library_id: Option<i64>,
+    pub kind: String,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
@@ -147,9 +148,24 @@ pub struct Download {
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
+pub struct DownloadItem {
+    pub id: i64,
+    pub download_id: i64,
+    pub source_path: String,
+    pub library_id: i64,
+    pub status: String,
+    pub destination_path: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub imported_at: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
 pub struct BookMetadata {
     pub id: i64,
     pub download_id: i64,
+    pub download_item_id: Option<i64>,
     pub asin: String,
     pub title: String,
     pub subtitle: Option<String>,
@@ -164,10 +180,19 @@ pub struct BookMetadata {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DownloadItemWithMetadata {
+    #[serde(flatten)]
+    pub item: DownloadItem,
+    pub metadata: Option<BookMetadataPublic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DownloadWithMetadata {
     #[serde(flatten)]
     pub download: Download,
     pub metadata: Option<BookMetadataPublic>,
+    #[serde(default)]
+    pub items: Vec<DownloadItemWithMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]

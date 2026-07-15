@@ -16,6 +16,24 @@ export type Library = {
   created_at?: string
 }
 
+export type DownloadItem = {
+  id: number
+  download_id: number
+  source_path: string
+  library_id: number
+  status: string
+  destination_path?: string | null
+  error_message?: string | null
+  metadata?: Download['metadata']
+}
+
+export type ContentEntry = {
+  path: string
+  name: string
+  is_dir: boolean
+  size: number
+}
+
 export type Download = {
   id: number
   user_id: number
@@ -29,6 +47,7 @@ export type Download = {
   destination_path: string | null
   error_message: string | null
   library_id?: number | null
+  kind?: string
   metadata?: {
     asin: string
     title: string
@@ -37,6 +56,7 @@ export type Download = {
     series_index?: string | null
     cover_url?: string | null
   } | null
+  items?: DownloadItem[]
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -132,10 +152,10 @@ export const api = {
     request<{ api_key: string; warning: string }>('/api-key', { method: 'POST' }),
   listDownloads: () => request<{ downloads: Download[] }>('/downloads'),
   getDownload: (id: number) => request<{ download: Download }>(`/downloads/${id}`),
-  createDownload: (input: string, name?: string) =>
+  createDownload: (input: string, name?: string, kind?: 'single' | 'pack') =>
     request<{ download: Download }>('/downloads', {
       method: 'POST',
-      body: JSON.stringify({ input, name }),
+      body: JSON.stringify({ input, name, kind }),
     }),
   deleteDownload: (id: number) => request(`/downloads/${id}`, { method: 'DELETE' }),
   matchDownload: (id: number, match_data: unknown, library_id?: number) =>
@@ -143,6 +163,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ match_data, library_id }),
     }),
+  startPack: (id: number) =>
+    request<{ download: Download }>(`/downloads/${id}/start-pack`, { method: 'POST' }),
+  downloadFiles: (id: number) =>
+    request<{ files: ContentEntry[]; source: string; content_path?: string | null }>(
+      `/downloads/${id}/files`,
+    ),
+  mapDownloadItem: (
+    id: number,
+    body: { source_path: string; match_data: unknown; library_id?: number },
+  ) =>
+    request<{ download: Download }>(`/downloads/${id}/items`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  unmapDownloadItem: (id: number, itemId: number) =>
+    request<{ download: Download }>(`/downloads/${id}/items/${itemId}`, { method: 'DELETE' }),
   searchMetadata: (title: string, author?: string) => {
     const q = new URLSearchParams({ title })
     if (author) q.set('author', author)

@@ -48,7 +48,14 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/003_library_abs_path.sql"),
     )
     .await?;
+    run_once(
+        pool,
+        "004_pack_items",
+        include_str!("../migrations/004_pack_items.sql"),
+    )
+    .await?;
     ensure_column(pool, "downloads", "library_id", "INTEGER REFERENCES libraries(id)").await?;
+    ensure_column(pool, "downloads", "kind", "TEXT NOT NULL DEFAULT 'single'").await?;
     ensure_column(
         pool,
         "settings",

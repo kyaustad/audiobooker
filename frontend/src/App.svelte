@@ -13,6 +13,7 @@
   import ApiKey from './pages/ApiKey.svelte'
   import Browse from './pages/Browse.svelte'
   import ChangePassword from './pages/ChangePassword.svelte'
+  import MapPack from './pages/MapPack.svelte'
 
   let loading = $state(true)
   let toastMsg = $state<string | null>(null)
@@ -39,6 +40,7 @@
     '/users': Users,
     '/api-key': ApiKey,
     '/browse': Browse,
+    '/map/:id': MapPack,
     '/password': ChangePassword,
   }
 

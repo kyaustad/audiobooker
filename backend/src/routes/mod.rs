@@ -49,6 +49,13 @@ pub fn router(state: AppState) -> Router {
             get(downloads::get).delete(downloads::delete),
         )
         .route("/downloads/{id}/match", post(downloads::match_metadata))
+        .route("/downloads/{id}/start-pack", post(downloads::start_pack))
+        .route("/downloads/{id}/files", get(downloads::list_files))
+        .route("/downloads/{id}/items", post(downloads::map_item))
+        .route(
+            "/downloads/{id}/items/{item_id}",
+            delete(downloads::unmap_item),
+        )
         .route("/metadata/search", get(metadata::search))
         .route("/metadata/asin/{asin}", get(metadata::by_asin))
         .route("/push/vapid", get(push::vapid_public))
