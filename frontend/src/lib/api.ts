@@ -186,15 +186,21 @@ export const api = {
   },
   metadataByAsin: (asin: string) =>
     request<{ match: unknown }>(`/metadata/asin/${encodeURIComponent(asin)}`),
-  abbBrowse: (page = 1) =>
-    request<{
+  abbCategories: () => request<{ categories: AbbCategory[] }>('/abb/categories'),
+  abbBrowse: (page = 1, category?: string) => {
+    const q = new URLSearchParams({ page: String(page) })
+    if (category) q.set('category', category)
+    return request<{
       results: AbbSearchResult[]
       page: number
       has_more: boolean
       mirror?: string
       mode?: string
       query?: string | null
-    }>(`/abb/browse?page=${page}`),
+      category?: string | null
+      category_label?: string | null
+    }>(`/abb/browse?${q}`)
+  },
   abbSearch: (q: string, page = 1) =>
     request<{
       results: AbbSearchResult[]
@@ -203,6 +209,8 @@ export const api = {
       mirror?: string
       mode?: string
       query?: string | null
+      category?: string | null
+      category_label?: string | null
     }>(`/abb/search?q=${encodeURIComponent(q)}&page=${page}`),
   abbDetails: (url: string) =>
     request<{ details: AbbDetails }>(`/abb/details?url=${encodeURIComponent(url)}`),
@@ -215,6 +223,12 @@ export const api = {
       body: JSON.stringify({ endpoint }),
     }),
   testPush: () => request('/push/test', { method: 'POST' }),
+}
+
+export type AbbCategory = {
+  slug: string
+  label: string
+  group: string
 }
 
 export type AbbSearchResult = {

@@ -141,6 +141,60 @@ button, input, select, textarea {
   min-width: 0;
 }
 
+.app-credit {
+  margin-top: auto;
+  padding-top: 1.25rem;
+  display: flex;
+  justify-content: center;
+}
+.app-credit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.95rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--bg-elevated) 88%, black);
+  color: var(--text) !important;
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-decoration: none !important;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+.app-credit-link:hover {
+  color: var(--text) !important;
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, var(--bg-elevated));
+  transform: translateY(-1px);
+}
+.app-credit-link:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent) 55%, transparent);
+  outline-offset: 2px;
+}
+.app-credit-link .gh-icon {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 auto;
+}
+
+.public-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.public-shell .auth-wrap {
+  flex: 1;
+  min-height: 0;
+}
+.public-shell .app-credit {
+  padding: 0 1rem 1.25rem;
+}
+
 .bottom-nav {
   display: none;
 }

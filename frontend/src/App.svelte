@@ -15,6 +15,7 @@
   import Browse from './pages/Browse.svelte'
   import ChangePassword from './pages/ChangePassword.svelte'
   import MapPack from './pages/MapPack.svelte'
+  import CreatedBy from './lib/CreatedBy.svelte'
 
   let loading = $state(true)
   let toastMsg = $state<string | null>(null)
@@ -158,6 +159,10 @@
       <Router routes={authedRoutes} />
     </main>
 
+    <footer class="app-credit">
+      <CreatedBy />
+    </footer>
+
     {#if user.role === 'user'}
       <nav class="bottom-nav" aria-label="Primary">
         <a href="#/" class:active={path === '/' || path.startsWith('/match') || path.startsWith('/map')}>
@@ -185,7 +190,12 @@
     {/if}
   </div>
 {:else}
-  <Router routes={publicRoutes} />
+  <div class="public-shell">
+    <Router routes={publicRoutes} />
+    <footer class="app-credit">
+      <CreatedBy />
+    </footer>
+  </div>
 {/if}
 
 {#if toastMsg}

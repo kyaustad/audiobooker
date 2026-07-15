@@ -32,9 +32,18 @@ pub struct AbbSearchPage {
     pub page: u32,
     pub has_more: bool,
     pub mirror: String,
-    /// `latest` (homepage feed) or `search`
+    /// `latest` | `search` | `category`
     pub mode: String,
     pub query: Option<String>,
+    pub category: Option<String>,
+    pub category_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AbbCategory {
+    pub slug: String,
+    pub label: String,
+    pub group: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +119,8 @@ impl AbbClient {
                 mirror: base.to_string(),
                 mode: "latest".into(),
                 query: None,
+                category: None,
+                category_label: None,
             });
         }
 
@@ -120,7 +131,50 @@ impl AbbClient {
             mirror: base.to_string(),
             mode: "latest".into(),
             query: None,
+            category: None,
+            category_label: None,
         })
+    }
+
+    /// Browse an ABB type/category page, e.g. `/audio-books/type/bestsellers/`.
+    pub async fn category(&self, slug: &str, page: u32) -> AppResult<AbbSearchPage> {
+        let slug = normalize_category_slug(slug).ok_or_else(|| {
+            AppError::BadRequest("Unknown or invalid AudiobookBay category".into())
+        })?;
+        let label = category_label_for(&slug);
+        let page = page.max(1);
+        let base = ABB_MIRRORS[0];
+
+        let url = if page <= 1 {
+            format!("{base}/audio-books/type/{slug}/")
+        } else {
+            format!("{base}/audio-books/type/{slug}/page/{page}/")
+        };
+
+        tracing::info!(%url, "ABB category fetch");
+        let html = self
+            .fetch_text(&url, base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+            .await?;
+        if !is_abb_search_results_page(&html) {
+            return Err(AppError::Internal(format!(
+                "AudiobookBay category '{slug}' did not return a listing page"
+            )));
+        }
+        let results = parse_listing(&html, base);
+        Ok(AbbSearchPage {
+            has_more: detect_has_more(&html, page) && !results.is_empty(),
+            results,
+            page,
+            mirror: base.to_string(),
+            mode: "category".into(),
+            query: None,
+            category: Some(slug),
+            category_label: Some(label),
+        })
+    }
+
+    pub fn categories() -> Vec<AbbCategory> {
+        abb_categories()
     }
 
     pub async fn search(&self, query: &str, page: u32) -> AppResult<AbbSearchPage> {
@@ -163,6 +217,8 @@ impl AbbClient {
                             mirror: base.to_string(),
                             mode: "search".into(),
                             query: Some(q.to_string()),
+                            category: None,
+                            category_label: None,
                         });
                     }
                     tracing::warn!(%url, "ABB HTML was not a search results page");
@@ -198,6 +254,8 @@ impl AbbClient {
                         mirror: base.to_string(),
                         mode: "search".into(),
                         query: Some(q.to_string()),
+                        category: None,
+                        category_label: None,
                     });
                 }
                 tracing::warn!(%rss_url, "ABB RSS was not a search feed");
@@ -286,6 +344,96 @@ fn detect_has_more(html: &str, current_page: u32) -> bool {
 fn is_abb_search_results_page(html: &str) -> bool {
     // Search/archive pages include this heading; the homepage does not.
     html.contains("class=\"archiveTitle\"") || html.contains("class='archiveTitle'")
+}
+
+fn abb_categories() -> Vec<AbbCategory> {
+    const RAW: &[(&str, &str, &str)] = &[
+        // Age
+        ("children", "Children", "Age"),
+        ("teen-young-adult", "Teen & Young Adult", "Age"),
+        ("new", "New", "Age"),
+        ("adults", "Adults", "Age"),
+        // Category modifiers (like Bestsellers)
+        ("bestsellers", "Bestsellers", "Modifiers"),
+        ("anthology", "Anthology", "Modifiers"),
+        ("classic", "Classic", "Modifiers"),
+        ("documentary", "Documentary", "Modifiers"),
+        ("full-cast", "Full Cast", "Modifiers"),
+        ("libertarian", "Libertarian", "Modifiers"),
+        ("military", "Military", "Modifiers"),
+        ("novel", "Novel", "Modifiers"),
+        ("short-story", "Short Story", "Modifiers"),
+        // Genres
+        ("postapocalyptic", "(Post)apocalyptic", "Category"),
+        ("action", "Action", "Category"),
+        ("adventure", "Adventure", "Category"),
+        ("art", "Art", "Category"),
+        ("autobiography-biographies", "Autobiography & Biographies", "Category"),
+        ("business", "Business", "Category"),
+        ("computer", "Computer", "Category"),
+        ("contemporary", "Contemporary", "Category"),
+        ("crime", "Crime", "Category"),
+        ("detective", "Detective", "Category"),
+        ("doctor-who-sci-fi", "Doctor Who", "Category"),
+        ("education", "Education", "Category"),
+        ("fantasy", "Fantasy", "Category"),
+        ("general-fiction", "General Fiction", "Category"),
+        ("general-non-fiction", "Misc. Non-fiction", "Category"),
+        ("historical-fiction", "Historical Fiction", "Category"),
+        ("history", "History", "Category"),
+        ("horror", "Horror", "Category"),
+        ("humor", "Humor", "Category"),
+        ("lecture", "Lecture", "Category"),
+        ("lgbt", "LGBT", "Category"),
+        ("light-novel", "Light Novel", "Category"),
+        ("literature", "Literature", "Category"),
+        ("litrpg", "LitRPG", "Category"),
+        ("mystery", "Mystery", "Category"),
+        ("paranormal", "Paranormal", "Category"),
+        ("plays-theater", "Plays & Theater", "Category"),
+        ("poetry", "Poetry", "Category"),
+        ("political", "Political", "Category"),
+        ("radio-productions", "Radio Productions", "Category"),
+        ("romance", "Romance", "Category"),
+        ("sci-fi", "Sci-Fi", "Category"),
+        ("science", "Science", "Category"),
+        ("self-help", "Self-help", "Category"),
+        ("spiritual", "Spiritual & Religious", "Category"),
+        ("sports", "Sport & Recreation", "Category"),
+        ("suspense", "Suspense", "Category"),
+        ("thriller", "Thriller", "Category"),
+        ("true-crime", "True Crime", "Category"),
+        ("tutorial", "Tutorial", "Category"),
+        ("westerns", "Westerns", "Category"),
+        ("zombies", "Zombies", "Category"),
+        ("other", "Other", "Category"),
+    ];
+    RAW.iter()
+        .map(|(slug, label, group)| AbbCategory {
+            slug: (*slug).into(),
+            label: (*label).into(),
+            group: (*group).into(),
+        })
+        .collect()
+}
+
+fn normalize_category_slug(raw: &str) -> Option<String> {
+    let slug = raw.trim().trim_matches('/').to_ascii_lowercase();
+    if slug.is_empty() || slug.contains('/') || slug.contains("..") {
+        return None;
+    }
+    abb_categories()
+        .into_iter()
+        .find(|c| c.slug == slug)
+        .map(|c| c.slug)
+}
+
+fn category_label_for(slug: &str) -> String {
+    abb_categories()
+        .into_iter()
+        .find(|c| c.slug == slug)
+        .map(|c| c.label)
+        .unwrap_or_else(|| slug.to_string())
 }
 
 /// True when the RSS document is clearly a search feed for this query.

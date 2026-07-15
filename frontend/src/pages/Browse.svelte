@@ -1,13 +1,26 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
-  import { api, type AbbDetails, type AbbSearchResult, type Download } from '../lib/api'
+  import {
+    api,
+    type AbbCategory,
+    type AbbDetails,
+    type AbbSearchResult,
+    type Download,
+  } from '../lib/api'
   import { showToast } from '../lib/toast'
 
-  type Mode = 'latest' | 'search'
+  type Mode = 'latest' | 'search' | 'category'
+  type CatGroup = 'Age' | 'Modifiers' | 'Category'
+
+  const GROUP_ORDER: CatGroup[] = ['Age', 'Modifiers', 'Category']
 
   let q = $state('')
   let mode = $state<Mode>('latest')
+  let categorySlug = $state<string | null>(null)
+  let categoryLabel = $state<string | null>(null)
+  let categories = $state<AbbCategory[]>([])
+  let activeGroup = $state<CatGroup | 'all'>('all')
   let page = $state(1)
   let hasMore = $state(false)
   let mirror = $state<string | null>(null)
@@ -21,6 +34,17 @@
   let detailsLoading = $state(false)
   let queue = $state<Download[]>([])
   let sentinelEl = $state<HTMLElement | null>(null)
+
+  const groupedCategories = $derived.by(() => {
+    const groups: { group: CatGroup; items: AbbCategory[] }[] = []
+    for (const group of GROUP_ORDER) {
+      const items = categories.filter((c) => c.group === group)
+      if (!items.length) continue
+      if (activeGroup !== 'all' && activeGroup !== group) continue
+      groups.push({ group, items })
+    }
+    return groups
+  })
 
   async function refreshQueue() {
     try {
@@ -43,11 +67,21 @@
     if (mode === 'search') {
       return api.abbSearch(q.trim(), nextPage)
     }
+    if (mode === 'category' && categorySlug) {
+      return api.abbBrowse(nextPage, categorySlug)
+    }
     return api.abbBrowse(nextPage)
   }
 
-  async function loadInitial(nextMode: Mode, query = q) {
+  async function loadInitial(
+    nextMode: Mode,
+    opts: { query?: string; category?: string | null } = {},
+  ) {
+    const query = opts.query ?? q
+    const nextCat = nextMode === 'category' ? (opts.category ?? categorySlug) : null
     mode = nextMode
+    categorySlug = nextCat
+    if (nextMode !== 'category') categoryLabel = null
     loading = true
     loadingMore = false
     error = null
@@ -57,20 +91,27 @@
     results = []
     hasMore = false
     try {
-      const [data] = await Promise.all([
-        nextMode === 'search' ? api.abbSearch(query.trim(), 1) : api.abbBrowse(1),
-        refreshQueue(),
-      ])
+      const listPromise =
+        nextMode === 'search'
+          ? api.abbSearch(query.trim(), 1)
+          : nextMode === 'category' && nextCat
+            ? api.abbBrowse(1, nextCat)
+            : api.abbBrowse(1)
+      const [data] = await Promise.all([listPromise, refreshQueue()])
       results = data.results
       page = data.page ?? 1
       hasMore = Boolean(data.has_more)
       mirror = data.mirror ?? null
-      mode = nextMode
+      mode = (data.mode as Mode) || nextMode
+      categorySlug = data.category ?? nextCat
+      categoryLabel = data.category_label ?? categoryLabel
       if (!results.length) {
         error =
           nextMode === 'search'
             ? 'No AudiobookBay results for that search. Try fewer words or quotes for an exact title.'
-            : 'No recent listings available.'
+            : nextMode === 'category'
+              ? 'No listings in that category.'
+              : 'No recent listings available.'
       }
     } catch (err) {
       results = []
@@ -88,17 +129,33 @@
       await showLatest()
       return
     }
-    await loadInitial('search', q)
+    categorySlug = null
+    categoryLabel = null
+    await loadInitial('search', { query: q })
   }
 
   async function showLatest() {
     q = ''
+    categorySlug = null
+    categoryLabel = null
     await loadInitial('latest')
+  }
+
+  async function showCategory(cat: AbbCategory) {
+    if (categorySlug === cat.slug && mode === 'category') {
+      await showLatest()
+      return
+    }
+    q = ''
+    categorySlug = cat.slug
+    categoryLabel = cat.label
+    await loadInitial('category', { category: cat.slug })
   }
 
   async function loadMore() {
     if (!hasMore || loading || loadingMore) return
     if (mode === 'search' && !q.trim()) return
+    if (mode === 'category' && !categorySlug) return
     loadingMore = true
     try {
       const next = page + 1
@@ -146,7 +203,15 @@
   })
 
   onMount(() => {
-    loadInitial('latest')
+    void api
+      .abbCategories()
+      .then((data) => {
+        categories = data.categories
+      })
+      .catch(() => {
+        /* browse still works without chips */
+      })
+    void loadInitial('latest')
   })
 
   async function openDetails(item: AbbSearchResult) {
@@ -197,7 +262,11 @@
   }
 
   const heading = $derived(
-    mode === 'search' && q.trim() ? `Results for “${q.trim()}”` : 'Recently added',
+    mode === 'search' && q.trim()
+      ? `Results for “${q.trim()}”`
+      : mode === 'category' && categoryLabel
+        ? categoryLabel
+        : 'Recently added',
   )
 </script>
 
@@ -207,8 +276,8 @@
       <p class="abb-kicker">Discover</p>
       <h1>Find audiobooks</h1>
       <p class="muted">
-        Browse the latest uploads from AudiobookBay, or search the same listings as the site.
-        Request a title to add it to your queue.
+        Browse latest uploads, AudiobookBay categories & modifiers, or search the same listings as
+        the site. Request a title to add it to your queue.
       </p>
     </div>
     <form class="discover-search" onsubmit={onSearch}>
@@ -238,7 +307,56 @@
       >
         Search
       </button>
+      {#if mode === 'category' && categoryLabel}
+        <button type="button" class="tab active" disabled={loading} onclick={showLatest}>
+          {categoryLabel} ×
+        </button>
+      {/if}
     </div>
+    {#if categories.length}
+      <div class="cat-panel">
+        <div class="mode-tabs cat-groups">
+          <button
+            type="button"
+            class="tab"
+            class:active={activeGroup === 'all'}
+            onclick={() => (activeGroup = 'all')}
+          >
+            All types
+          </button>
+          {#each GROUP_ORDER as group}
+            <button
+              type="button"
+              class="tab"
+              class:active={activeGroup === group}
+              onclick={() => (activeGroup = group)}
+            >
+              {group === 'Category' ? 'Genres' : group}
+            </button>
+          {/each}
+        </div>
+        {#each groupedCategories as section}
+          <div class="cat-row">
+            {#if activeGroup === 'all'}
+              <span class="cat-row-label">{section.group === 'Category' ? 'Genre' : section.group}</span>
+            {/if}
+            <div class="cat-chips">
+              {#each section.items as cat}
+                <button
+                  type="button"
+                  class="cat-chip"
+                  class:active={mode === 'category' && categorySlug === cat.slug}
+                  disabled={loading}
+                  onclick={() => showCategory(cat)}
+                >
+                  {cat.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
   </header>
 
   {#if error}
@@ -412,6 +530,51 @@
   }
   .mode-tabs .tab.active,
   .mode-tabs .tab:hover:not(:disabled) {
+    color: var(--text) !important;
+    border-color: var(--accent) !important;
+    background: color-mix(in oklab, var(--accent) 12%, transparent) !important;
+  }
+  .cat-panel {
+    margin-top: 0.85rem;
+    display: grid;
+    gap: 0.55rem;
+  }
+  .cat-groups {
+    margin-top: 0;
+    flex-wrap: wrap;
+  }
+  .cat-row {
+    display: grid;
+    gap: 0.35rem;
+  }
+  .cat-row-label {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 700;
+  }
+  .cat-chips {
+    display: flex;
+    gap: 0.4rem;
+    overflow-x: auto;
+    padding-bottom: 0.15rem;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .cat-chip {
+    flex: 0 0 auto;
+    background: transparent !important;
+    color: var(--muted) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 999px;
+    padding: 0.32rem 0.75rem !important;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .cat-chip.active,
+  .cat-chip:hover:not(:disabled) {
     color: var(--text) !important;
     border-color: var(--accent) !important;
     background: color-mix(in oklab, var(--accent) 12%, transparent) !important;
