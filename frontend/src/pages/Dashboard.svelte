@@ -5,6 +5,8 @@
   import { enableNotifications, disableNotifications, getPushStatus, sendTestNotification } from '../lib/push'
   import { showToast } from '../lib/toast'
 
+  type Tab = 'all' | 'matching' | 'active' | 'completed' | 'failed'
+
   let downloads = $state<Download[]>([])
   let input = $state('')
   let name = $state('')
@@ -14,7 +16,36 @@
   let pushSubscribed = $state(false)
   let pushSupported = $state(true)
   let needsHttps = $state(false)
+  let tab = $state<Tab>('all')
+  let confirmId = $state<number | null>(null)
+  let confirmText = $state('')
+  let removingId = $state<number | null>(null)
   let timer: number | undefined
+
+  const SEEDING_STATUSES = new Set(['completed', 'copying', 'imported'])
+
+  function tabFor(status: string): Tab {
+    if (status === 'awaiting_match') return 'matching'
+    if (status === 'error') return 'failed'
+    if (SEEDING_STATUSES.has(status) || status === 'completed') return 'completed'
+    return 'active'
+  }
+
+  function canRemove(d: Download) {
+    return !SEEDING_STATUSES.has(d.status)
+  }
+
+  const counts = $derived({
+    all: downloads.length,
+    matching: downloads.filter((d) => tabFor(d.status) === 'matching').length,
+    active: downloads.filter((d) => tabFor(d.status) === 'active').length,
+    completed: downloads.filter((d) => tabFor(d.status) === 'completed').length,
+    failed: downloads.filter((d) => tabFor(d.status) === 'failed').length,
+  })
+
+  const visible = $derived(
+    tab === 'all' ? downloads : downloads.filter((d) => tabFor(d.status) === tab),
+  )
 
   async function refresh() {
     const data = await api.listDownloads()
@@ -58,13 +89,35 @@
     }
   }
 
-  async function remove(id: number) {
+  function beginRemove(d: Download) {
+    if (!canRemove(d)) {
+      showToast('Completed downloads stay in the queue to seed. qBittorrent removes them at your ratio limit.')
+      return
+    }
+    confirmId = d.id
+    confirmText = ''
+  }
+
+  function cancelRemove() {
+    confirmId = null
+    confirmText = ''
+  }
+
+  async function confirmRemove(d: Download) {
+    if (confirmText.trim().toUpperCase() !== 'REMOVE') {
+      showToast('Type REMOVE to confirm')
+      return
+    }
+    removingId = d.id
     try {
-      await api.deleteDownload(id)
-      showToast('Removed')
+      await api.deleteDownload(d.id)
+      showToast('Removed from queue')
+      cancelRemove()
       await refresh()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to remove')
+    } finally {
+      removingId = null
     }
   }
 
@@ -111,6 +164,10 @@
     const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1)
     return `${(n / 1024 ** i).toFixed(1)} ${u[i]}`
   }
+
+  function statusLabel(status: string) {
+    return status.replaceAll('_', ' ')
+  }
 </script>
 
 <div class="card">
@@ -154,20 +211,48 @@
     </label>
     <div class="row">
       <button type="submit" disabled={submitting}>{submitting ? 'Adding…' : 'Add download'}</button>
-      <a class="btn secondary" href="#/browse" style="display:inline-flex;align-items:center">Open AudiobookBay</a>
+      <a class="btn secondary" href="#/browse" style="display:inline-flex;align-items:center">Open Discover</a>
     </div>
   </form>
 </div>
 
 <div class="card">
   <h3>Downloads</h3>
+  <div class="status-tabs" role="tablist" aria-label="Download status">
+    {#each [
+      ['all', 'All'],
+      ['matching', 'Matching'],
+      ['active', 'Active'],
+      ['completed', 'Completed'],
+      ['failed', 'Failed'],
+    ] as [id, label]}
+      <button
+        type="button"
+        role="tab"
+        class="tab"
+        class:active={tab === id}
+        aria-selected={tab === id}
+        onclick={() => (tab = id as Tab)}
+      >
+        {label}
+        <span class="count">{counts[id as Tab]}</span>
+      </button>
+    {/each}
+  </div>
+
   {#if loading}
     <p class="muted">Loading…</p>
-  {:else if downloads.length === 0}
-    <p class="muted">No downloads yet.</p>
+  {:else if visible.length === 0}
+    <p class="muted">
+      {#if downloads.length === 0}
+        No downloads yet.
+      {:else}
+        Nothing in this tab.
+      {/if}
+    </p>
   {:else}
     <div class="download-grid" style="margin-top:0.75rem">
-      {#each downloads as d}
+      {#each visible as d}
         <div class="card download-item" style="margin:0">
           <img src={d.metadata?.cover_url || '/favicon.svg'} alt="" />
           <div>
@@ -176,7 +261,7 @@
               <div class="muted">{d.metadata.authors.join(', ')}</div>
             {/if}
             <div style="margin:0.45rem 0">
-              <span class={`badge ${d.status}`}>{d.status}</span>
+              <span class={`badge ${d.status}`}>{statusLabel(d.status)}</span>
             </div>
             <div class="progress"><span style={`width:${Math.round(d.progress * 100)}%`}></span></div>
             <div class="muted" style="margin-top:0.35rem">
@@ -185,18 +270,116 @@
             {#if d.destination_path}
               <div class="muted">Imported to {d.destination_path}</div>
             {/if}
+            {#if SEEDING_STATUSES.has(d.status)}
+              <div class="muted seeding-note">Seeding in qBittorrent — leave this entry; the client drops it at your ratio.</div>
+            {/if}
             {#if d.error_message}
               <div style="color:var(--danger);font-size:0.85rem">{d.error_message}</div>
+            {/if}
+
+            {#if confirmId === d.id}
+              <div class="remove-confirm">
+                <p>
+                  This removes the torrent from Audiobooker’s queue and from qBittorrent
+                  <strong>without</strong> deleting downloaded files. Type <code>REMOVE</code> to confirm.
+                </p>
+                <input
+                  bind:value={confirmText}
+                  placeholder="Type REMOVE"
+                  autocomplete="off"
+                  aria-label="Type REMOVE to confirm"
+                />
+                <div class="row">
+                  <button
+                    class="danger"
+                    type="button"
+                    disabled={removingId === d.id || confirmText.trim().toUpperCase() !== 'REMOVE'}
+                    onclick={() => confirmRemove(d)}
+                  >
+                    {removingId === d.id ? 'Removing…' : 'Confirm remove'}
+                  </button>
+                  <button class="secondary" type="button" disabled={removingId === d.id} onclick={cancelRemove}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
             {/if}
           </div>
           <div class="actions stack">
             {#if d.status === 'awaiting_match'}
               <a class="btn" href={`#/match/${d.id}`}>Match</a>
             {/if}
-            <button class="danger" type="button" onclick={() => remove(d.id)}>Remove</button>
+            {#if canRemove(d)}
+              {#if confirmId !== d.id}
+                <button class="danger" type="button" onclick={() => beginRemove(d)}>Remove</button>
+              {/if}
+            {:else}
+              <span class="muted tiny">Seeding — locked</span>
+            {/if}
           </div>
         </div>
       {/each}
     </div>
   {/if}
 </div>
+
+<style>
+  .status-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.75rem 0 0.25rem;
+  }
+  .status-tabs .tab {
+    background: transparent !important;
+    color: var(--muted) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 999px;
+    padding: 0.35rem 0.75rem !important;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .status-tabs .tab.active,
+  .status-tabs .tab:hover {
+    color: var(--text) !important;
+    border-color: var(--accent) !important;
+    background: color-mix(in oklab, var(--accent) 12%, transparent) !important;
+  }
+  .count {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--bg);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+  }
+  .tab.active .count {
+    color: var(--accent);
+  }
+  .seeding-note {
+    margin-top: 0.35rem;
+    font-size: 0.82rem;
+  }
+  .remove-confirm {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid color-mix(in oklab, var(--danger) 45%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--danger) 8%, transparent);
+    display: grid;
+    gap: 0.55rem;
+  }
+  .remove-confirm p {
+    margin: 0;
+    font-size: 0.88rem;
+  }
+  .tiny {
+    font-size: 0.78rem;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+  }
+</style>

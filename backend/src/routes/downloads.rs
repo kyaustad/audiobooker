@@ -315,6 +315,17 @@ pub async fn delete(
     }
     .ok_or(AppError::NotFound)?;
 
+    // Keep completed / imported torrents so qBit can seed until its own ratio rules apply.
+    if matches!(
+        download.status.as_str(),
+        "completed" | "copying" | "imported"
+    ) {
+        return Err(AppError::BadRequest(
+            "Completed downloads can't be removed from Audiobooker while they need to seed. Let qBittorrent drop them at your ratio limit."
+                .into(),
+        ));
+    }
+
     let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
         .fetch_one(&state.pool)
         .await?;

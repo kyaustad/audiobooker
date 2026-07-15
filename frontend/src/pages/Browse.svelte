@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, type AbbDetails, type AbbSearchResult, type Download } from '../lib/api'
   import { showToast } from '../lib/toast'
@@ -21,7 +21,6 @@
   let detailsLoading = $state(false)
   let queue = $state<Download[]>([])
   let sentinelEl = $state<HTMLElement | null>(null)
-  let observer: IntersectionObserver | undefined
 
   async function refreshQueue() {
     try {
@@ -40,7 +39,7 @@
     })
   }
 
-  async function fetchPage(nextPage: number, append: boolean) {
+  async function fetchPage(nextPage: number) {
     if (mode === 'search') {
       return api.abbSearch(q.trim(), nextPage)
     }
@@ -56,6 +55,7 @@
     details = null
     page = 1
     results = []
+    hasMore = false
     try {
       const [data] = await Promise.all([
         nextMode === 'search' ? api.abbSearch(query.trim(), 1) : api.abbBrowse(1),
@@ -102,38 +102,52 @@
     loadingMore = true
     try {
       const next = page + 1
-      const data = await fetchPage(next, true)
+      const data = await fetchPage(next)
       const seen = new Set(results.map((r) => r.url))
-      results = [...results, ...data.results.filter((r) => !seen.has(r.url))]
-      page = data.page ?? next
-      hasMore = Boolean(data.has_more)
-      mirror = data.mirror ?? mirror
+      const added = data.results.filter((r) => !seen.has(r.url))
+      if (!added.length) {
+        hasMore = false
+      } else {
+        results = [...results, ...added]
+        page = data.page ?? next
+        hasMore = Boolean(data.has_more)
+        mirror = data.mirror ?? mirror
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not load more')
       hasMore = false
     } finally {
       loadingMore = false
+      // Observer only fires on intersection *changes*; keep paging while the
+      // sentinel is still near the viewport.
+      queueMicrotask(() => {
+        if (!hasMore || !sentinelEl) return
+        const top = sentinelEl.getBoundingClientRect().top
+        if (top < window.innerHeight + 900) void loadMore()
+      })
     }
   }
 
-  onMount(() => {
-    observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) loadMore()
-      },
-      { rootMargin: '480px' },
-    )
-    loadInitial('latest')
-  })
-
+  // Create the observer when the sentinel exists. (A module-level observer set in
+  // onMount races Svelte 5 $effect and often never attaches.)
   $effect(() => {
     const el = sentinelEl
-    if (!observer || !el) return
-    observer.observe(el)
-    return () => observer?.unobserve(el)
+    if (!el || !hasMore || loading) return
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void loadMore()
+        }
+      },
+      { root: null, rootMargin: '800px 0px', threshold: 0 },
+    )
+    obs.observe(el)
+    return () => obs.disconnect()
   })
 
-  onDestroy(() => observer?.disconnect())
+  onMount(() => {
+    loadInitial('latest')
+  })
 
   async function openDetails(item: AbbSearchResult) {
     selected = item
@@ -270,7 +284,11 @@
     <div class="scroll-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
     {#if loadingMore}
       <p class="muted" style="text-align:center">Loading more…</p>
-    {:else if !hasMore}
+    {:else if hasMore}
+      <div class="load-more-wrap">
+        <button class="secondary" type="button" onclick={() => loadMore()}>Load more</button>
+      </div>
+    {:else}
       <p class="muted" style="text-align:center;margin:1rem 0 1.5rem">End of list</p>
     {/if}
   {:else}
@@ -500,8 +518,13 @@
     100% { background-position: -100% 0; }
   }
   .scroll-sentinel {
-    height: 1px;
+    height: 24px;
     width: 100%;
+  }
+  .load-more-wrap {
+    display: flex;
+    justify-content: center;
+    margin: 0.75rem 0 1.5rem;
   }
   .empty, .banner-warn {
     border: 1px solid var(--border);
