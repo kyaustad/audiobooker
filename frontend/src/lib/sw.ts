@@ -15,6 +15,14 @@ export function registerServiceWorker() {
 
   navigator.serviceWorker.addEventListener('message', (event) => {
     if (event.data?.type === 'SW_ACTIVATED') reloadOnce()
+    if (event.data?.type === 'NOTIFICATION_NAV' && typeof event.data.url === 'string') {
+      const url = event.data.url as string
+      if (url.startsWith('/#') || url.startsWith('#')) {
+        location.hash = url.replace(/^\/#/, '#').replace(/^#/, '#')
+      } else if (url.startsWith('/')) {
+        location.assign(url)
+      }
+    }
   })
 
   const register = async () => {

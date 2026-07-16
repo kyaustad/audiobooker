@@ -1,8 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
-  import { api, type Download } from '../lib/api'
-  import { enableNotifications, disableNotifications, getPushStatus, sendTestNotification } from '../lib/push'
+  import { api, type Download, type NotificationPrefs } from '../lib/api'
+  import {
+    enableNotifications,
+    disableNotifications,
+    getPushStatus,
+    saveNotificationPrefs,
+    sendTestNotification,
+  } from '../lib/push'
   import { showToast } from '../lib/toast'
 
   type Tab = 'all' | 'matching' | 'active' | 'completed' | 'failed'
@@ -16,6 +22,15 @@
   let pushSubscribed = $state(false)
   let pushSupported = $state(true)
   let needsHttps = $state(false)
+  let needsInstall = $state(false)
+  let isIos = $state(false)
+  let prefs = $state<NotificationPrefs>({
+    notify_imported: true,
+    notify_download_finished: false,
+    notify_pack_ready: true,
+    notify_failures: true,
+  })
+  let prefsBusy = $state(false)
   let tab = $state<Tab>('all')
   let removingId = $state<number | null>(null)
   let timer: number | undefined
@@ -69,10 +84,13 @@
     const status = await getPushStatus()
     pushSupported = status.supported
     pushSubscribed = status.subscribed && status.permission === 'granted'
+    needsHttps = status.needsHttps
+    needsInstall = status.needsInstall
+    isIos = status.isIos
+    prefs = status.preferences
   }
 
   onMount(() => {
-    needsHttps = !window.isSecureContext && location.hostname !== 'localhost'
     refresh()
       .catch((e) => showToast(e.message))
       .finally(() => (loading = false))
@@ -134,6 +152,11 @@
         await enableNotifications()
         pushSubscribed = true
         showToast('Notifications enabled')
+        try {
+          await sendTestNotification()
+        } catch {
+          /* optional */
+        }
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Push failed')
@@ -151,12 +174,27 @@
         pushSubscribed = true
       }
       await sendTestNotification()
-      showToast('Test notification sent')
+      showToast(isIos ? 'Test sent — check Notification Center' : 'Test notification sent')
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Test failed')
       await refreshPush()
     } finally {
       pushBusy = false
+    }
+  }
+
+  async function togglePref(key: keyof NotificationPrefs) {
+    const next = { ...prefs, [key]: !prefs[key] }
+    prefs = next
+    if (!pushSubscribed) return
+    prefsBusy = true
+    try {
+      await saveNotificationPrefs(next)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not save notification settings')
+      await refreshPush()
+    } finally {
+      prefsBusy = false
     }
   }
 
@@ -179,17 +217,15 @@
       <p class="muted hide-mobile">
         Add an info hash or magnet, then match Audible metadata before download starts.
       </p>
-      {#if pushSupported}
-        <p class="muted push-line">
-          Notifications: {pushSubscribed ? 'on' : 'off'}
-          {#if needsHttps}
-            · require HTTPS
-          {/if}
-        </p>
-      {/if}
+      <p class="muted push-line">
+        Notifications: {pushSubscribed ? 'on' : 'off'}
+        {#if needsHttps}
+          · require HTTPS
+        {/if}
+      </p>
     </div>
-    {#if pushSupported}
-      <div class="push-actions">
+    <div class="push-actions">
+      {#if pushSupported}
         <button class="secondary" type="button" disabled={pushBusy} onclick={togglePush}>
           {#if pushBusy}
             Working…
@@ -202,9 +238,60 @@
         <button class="secondary" type="button" disabled={pushBusy} onclick={testPush}>
           Send test
         </button>
-      </div>
-    {/if}
+      {:else if needsInstall}
+        <span class="muted tiny">Install to Home Screen to enable</span>
+      {/if}
+    </div>
   </div>
+
+  {#if needsInstall}
+    <div class="banner-warn ios-hint">
+      On iPhone/iPad, open Safari → Share → <strong>Add to Home Screen</strong>, then launch
+      Audiobooker from the home-screen icon (not a Safari tab) to enable notifications.
+    </div>
+  {/if}
+
+  {#if pushSupported || pushSubscribed}
+    <div class="notify-prefs" class:dim={!pushSubscribed}>
+      <p class="muted tiny prefs-label">Notify me when</p>
+      <label class="pref">
+        <input
+          type="checkbox"
+          checked={prefs.notify_imported}
+          disabled={prefsBusy || !pushSubscribed}
+          onchange={() => togglePref('notify_imported')}
+        />
+        Ready in library
+      </label>
+      <label class="pref">
+        <input
+          type="checkbox"
+          checked={prefs.notify_pack_ready}
+          disabled={prefsBusy || !pushSubscribed}
+          onchange={() => togglePref('notify_pack_ready')}
+        />
+        Pack ready to map
+      </label>
+      <label class="pref">
+        <input
+          type="checkbox"
+          checked={prefs.notify_download_finished}
+          disabled={prefsBusy || !pushSubscribed}
+          onchange={() => togglePref('notify_download_finished')}
+        />
+        Download finished (before import)
+      </label>
+      <label class="pref">
+        <input
+          type="checkbox"
+          checked={prefs.notify_failures}
+          disabled={prefsBusy || !pushSubscribed}
+          onchange={() => togglePref('notify_failures')}
+        />
+        Failures
+      </label>
+    </div>
+  {/if}
 
   <form class="stack add-form" onsubmit={addDownload}>
     <label>Magnet or info hash
@@ -325,6 +412,40 @@
   }
   .push-line {
     margin-top: 0.35rem;
+  }
+  .notify-prefs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem 1rem;
+    align-items: center;
+    margin-top: 0.85rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+  .notify-prefs.dim {
+    opacity: 0.55;
+  }
+  .prefs-label {
+    width: 100%;
+    margin: 0;
+  }
+  .pref {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--text);
+    font-size: 0.88rem;
+    flex: 0 0 auto;
+  }
+  .ios-hint {
+    margin-top: 0.75rem;
+  }
+  .banner-warn {
+    background: color-mix(in oklab, var(--warning) 16%, transparent);
+    border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
+    border-radius: 8px;
+    padding: 0.7rem 0.85rem;
+    font-size: 0.9rem;
   }
   .status-tabs {
     display: flex;

@@ -25,6 +25,8 @@ pub struct PushPayload {
     pub title: String,
     pub body: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 pub async fn ensure_vapid_keys(pool: &SqlitePool) -> AppResult<(String, String)> {

@@ -34,13 +34,65 @@ pub struct User {
     pub password_hash: String,
     pub role: String,
     pub must_change_password: bool,
+    pub notify_imported: bool,
+    pub notify_download_finished: bool,
+    pub notify_pack_ready: bool,
+    pub notify_failures: bool,
+    pub abs_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Column list for `User` FromRow queries (keep in sync with struct fields).
+pub const USER_COLUMNS: &str = "id, username, password_hash, role, must_change_password, \
+    notify_imported, notify_download_finished, notify_pack_ready, notify_failures, \
+    abs_user_id, created_at, updated_at";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationPrefs {
+    pub notify_imported: bool,
+    pub notify_download_finished: bool,
+    pub notify_pack_ready: bool,
+    pub notify_failures: bool,
+}
+
+impl From<&User> for NotificationPrefs {
+    fn from(u: &User) -> Self {
+        Self {
+            notify_imported: u.notify_imported,
+            notify_download_finished: u.notify_download_finished,
+            notify_pack_ready: u.notify_pack_ready,
+            notify_failures: u.notify_failures,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyKind {
+    Imported,
+    DownloadFinished,
+    PackReady,
+    Failure,
+}
+
+impl NotificationPrefs {
+    pub fn allows(&self, kind: NotifyKind) -> bool {
+        match kind {
+            NotifyKind::Imported => self.notify_imported,
+            NotifyKind::DownloadFinished => self.notify_download_finished,
+            NotifyKind::PackReady => self.notify_pack_ready,
+            NotifyKind::Failure => self.notify_failures,
+        }
+    }
 }
 
 impl User {
     pub fn is_root(&self) -> bool {
         self.role == "root"
+    }
+
+    pub fn notification_prefs(&self) -> NotificationPrefs {
+        NotificationPrefs::from(self)
     }
 }
 
@@ -64,6 +116,12 @@ pub struct Settings {
     pub audiobookshelf_url: String,
     #[serde(skip_serializing)]
     pub audiobookshelf_token: String,
+    pub abs_user_sync_enabled: bool,
+    pub abs_user_sync_interval_ms: i64,
+    #[serde(skip_serializing)]
+    pub abs_user_default_password: String,
+    pub abs_user_sync_libraries: bool,
+    pub abs_user_last_sync_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -82,6 +140,11 @@ pub struct SettingsPublic {
     pub vapid_configured: bool,
     pub audiobookshelf_url: String,
     pub audiobookshelf_token_set: bool,
+    pub abs_user_sync_enabled: bool,
+    pub abs_user_sync_interval_ms: i64,
+    pub abs_user_default_password_set: bool,
+    pub abs_user_sync_libraries: bool,
+    pub abs_user_last_sync_at: Option<String>,
 }
 
 impl From<Settings> for SettingsPublic {
@@ -100,6 +163,11 @@ impl From<Settings> for SettingsPublic {
             vapid_configured: !s.vapid_public_key.is_empty() && !s.vapid_private_key.is_empty(),
             audiobookshelf_url: s.audiobookshelf_url,
             audiobookshelf_token_set: !s.audiobookshelf_token.is_empty(),
+            abs_user_sync_enabled: s.abs_user_sync_enabled,
+            abs_user_sync_interval_ms: s.abs_user_sync_interval_ms,
+            abs_user_default_password_set: !s.abs_user_default_password.is_empty(),
+            abs_user_sync_libraries: s.abs_user_sync_libraries,
+            abs_user_last_sync_at: s.abs_user_last_sync_at,
         }
     }
 }

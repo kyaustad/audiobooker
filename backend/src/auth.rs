@@ -68,7 +68,8 @@ pub async fn user_from_session(pool: &SqlitePool, session_id: &str) -> AppResult
     let user = sqlx::query_as::<_, User>(
         r#"
         SELECT u.id, u.username, u.password_hash, u.role, u.must_change_password,
-               u.created_at, u.updated_at
+               u.notify_imported, u.notify_download_finished, u.notify_pack_ready, u.notify_failures,
+               u.abs_user_id, u.created_at, u.updated_at
         FROM sessions s
         JOIN users u ON u.id = s.user_id
         WHERE s.id = ? AND s.expires_at > ?
@@ -188,10 +189,10 @@ async fn authenticate_api_key(pool: &SqlitePool, raw: &str) -> AppResult<Option<
     }
 
     // API key authenticates as root for admin automation.
-    let user = sqlx::query_as::<_, User>(
-        r#"SELECT id, username, password_hash, role, must_change_password, created_at, updated_at
-           FROM users WHERE role = 'root' ORDER BY id LIMIT 1"#,
-    )
+    let user = sqlx::query_as::<_, User>(&format!(
+        "SELECT {cols} FROM users WHERE role = 'root' ORDER BY id LIMIT 1",
+        cols = crate::models::USER_COLUMNS
+    ))
     .fetch_optional(pool)
     .await?;
     Ok(user)

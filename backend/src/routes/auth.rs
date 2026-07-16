@@ -32,10 +32,10 @@ pub async fn login(
     Json(body): Json<LoginRequest>,
 ) -> AppResult<(CookieJar, Json<Value>)> {
     let username = body.username.trim();
-    let user = sqlx::query_as::<_, User>(
-        r#"SELECT id, username, password_hash, role, must_change_password, created_at, updated_at
-           FROM users WHERE username = ? COLLATE NOCASE"#,
-    )
+    let user = sqlx::query_as::<_, User>(&format!(
+        "SELECT {cols} FROM users WHERE username = ? COLLATE NOCASE",
+        cols = crate::models::USER_COLUMNS
+    ))
     .bind(username)
     .fetch_optional(&state.pool)
     .await?

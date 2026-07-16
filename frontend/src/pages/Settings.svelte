@@ -15,6 +15,8 @@
   let newName = $state('')
   let newPath = $state('')
   let syncing = $state(false)
+  let syncingUsers = $state(false)
+  let absDefaultPassword = $state('')
 
   function needsPath(path: string) {
     const p = path.trim()
@@ -57,14 +59,18 @@
       const body: Record<string, unknown> = { ...settings }
       if (password) body.qbittorrent_password = password
       if (absToken) body.audiobookshelf_token = absToken
+      if (absDefaultPassword) body.abs_user_default_password = absDefaultPassword
       delete body.qbittorrent_password_set
       delete body.vapid_configured
       delete body.vapid_public_key
       delete body.audiobookshelf_token_set
+      delete body.abs_user_default_password_set
+      delete body.abs_user_last_sync_at
       const data = await api.updateSettings(body)
       settings = data.settings
       password = ''
       absToken = ''
+      absDefaultPassword = ''
       showToast('Settings saved')
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Save failed')
@@ -151,6 +157,36 @@
       syncing = false
     }
   }
+
+  async function syncAbsUsers() {
+    syncingUsers = true
+    try {
+      // Persist form values first so sync uses the latest URL/token/password.
+      const body: Record<string, unknown> = { ...settings }
+      if (absToken) body.audiobookshelf_token = absToken
+      if (absDefaultPassword) body.abs_user_default_password = absDefaultPassword
+      delete body.qbittorrent_password_set
+      delete body.vapid_configured
+      delete body.vapid_public_key
+      delete body.audiobookshelf_token_set
+      delete body.abs_user_default_password_set
+      delete body.abs_user_last_sync_at
+      const saved = await api.updateSettings(body)
+      settings = saved.settings
+      absToken = ''
+      absDefaultPassword = ''
+
+      const data = await api.syncAbsUsers()
+      settings = data.settings
+      showToast(
+        `Users: ${data.created} created, ${data.linked} linked, ${data.updated_libraries} library updates (${data.skipped} skipped)`,
+      )
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'ABS user sync failed')
+    } finally {
+      syncingUsers = false
+    }
+  }
 </script>
 
 {#if loading}
@@ -216,6 +252,39 @@
       </label>
     </div>
 
+    <div>
+      <h3 style="margin:0.5rem 0 0.25rem">ABS user sync</h3>
+      <p class="muted" style="margin:0">
+        Pull regular ABS users into Audiobooker. Passwords cannot be read from ABS — new accounts get a
+        default password and must change it on first login. OpenID would share login via an identity
+        provider, not sync ABS passwords.
+      </p>
+    </div>
+    <label class="check-row">
+      <input type="checkbox" bind:checked={settings.abs_user_sync_enabled} />
+      Automatically sync ABS users on a schedule
+    </label>
+    <div class="row">
+      <label>User sync interval (ms)
+        <input type="number" min="60000" step="60000" bind:value={settings.abs_user_sync_interval_ms} />
+      </label>
+      <label>Default password for new users {settings.abs_user_default_password_set ? '(saved — leave blank to keep)' : ''}
+        <input
+          bind:value={absDefaultPassword}
+          type="password"
+          placeholder={settings.abs_user_default_password_set ? 'Leave blank to keep (default changeme)' : 'changeme'}
+          autocomplete="new-password"
+        />
+      </label>
+    </div>
+    <label class="check-row">
+      <input type="checkbox" bind:checked={settings.abs_user_sync_libraries} />
+      Map ABS library access onto Audiobooker libraries (by ABS library id)
+    </label>
+    {#if settings.abs_user_last_sync_at}
+      <p class="muted" style="margin:0">Last user sync: {settings.abs_user_last_sync_at}</p>
+    {/if}
+
     <div class="row">
       <button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
       <button class="secondary" type="button" disabled={testing} onclick={test}>
@@ -223,6 +292,9 @@
       </button>
       <button class="secondary" type="button" disabled={syncing} onclick={syncAbs}>
         {syncing ? 'Syncing…' : 'Sync libraries from ABS'}
+      </button>
+      <button class="secondary" type="button" disabled={syncingUsers} onclick={syncAbsUsers}>
+        {syncingUsers ? 'Syncing users…' : 'Sync users from ABS'}
       </button>
     </div>
   </form>
@@ -322,5 +394,12 @@
     margin: 0;
     font-size: 0.88rem;
     color: #c45c26;
+  }
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    color: var(--text);
+    font-size: 0.92rem;
   }
 </style>

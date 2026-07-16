@@ -1,4 +1,4 @@
-import { api } from './api'
+import { api, type NotificationPrefs } from './api'
 
 function urlBase64ToUint8Array(base64String: string) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
@@ -9,21 +9,89 @@ function urlBase64ToUint8Array(base64String: string) {
   return output
 }
 
-export async function getPushStatus() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    return { supported: false, permission: 'denied' as NotificationPermission | 'denied', subscribed: false }
+export function isIosDevice() {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent || ''
+  const iOS = /iPad|iPhone|iPod/.test(ua)
+  const iPadOs = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1
+  return iOS || iPadOs
+}
+
+export function isStandalonePwa() {
+  if (typeof window === 'undefined') return false
+  const mq = window.matchMedia?.('(display-mode: standalone)')?.matches
+  const legacy = 'standalone' in navigator && Boolean((navigator as Navigator & { standalone?: boolean }).standalone)
+  return Boolean(mq || legacy)
+}
+
+export type PushCapability = {
+  supported: boolean
+  permission: NotificationPermission | 'denied' | 'default' | 'granted'
+  subscribed: boolean
+  needsHttps: boolean
+  needsInstall: boolean
+  isIos: boolean
+  preferences: NotificationPrefs
+}
+
+const defaultPrefs = (): NotificationPrefs => ({
+  notify_imported: true,
+  notify_download_finished: false,
+  notify_pack_ready: true,
+  notify_failures: true,
+})
+
+export async function getPushStatus(): Promise<PushCapability> {
+  const needsHttps = !window.isSecureContext && location.hostname !== 'localhost'
+  const ios = isIosDevice()
+  const standalone = isStandalonePwa()
+  const hasPush = 'serviceWorker' in navigator && 'PushManager' in window
+  const needsInstall = ios && !standalone
+
+  if (!hasPush) {
+    return {
+      supported: false,
+      permission: 'denied',
+      subscribed: false,
+      needsHttps,
+      needsInstall,
+      isIos: ios,
+      preferences: defaultPrefs(),
+    }
   }
+
   const permission = Notification.permission
   try {
     const server = await api.pushStatus()
-    return { supported: true, permission, subscribed: server.subscribed && permission === 'granted' }
+    return {
+      supported: true,
+      permission,
+      subscribed: server.subscribed && permission === 'granted',
+      needsHttps,
+      needsInstall: false,
+      isIos: ios,
+      preferences: server.preferences ?? defaultPrefs(),
+    }
   } catch {
-    return { supported: true, permission, subscribed: false }
+    return {
+      supported: true,
+      permission,
+      subscribed: false,
+      needsHttps,
+      needsInstall: false,
+      isIos: ios,
+      preferences: defaultPrefs(),
+    }
   }
 }
 
 export async function enableNotifications() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    if (isIosDevice() && !isStandalonePwa()) {
+      throw new Error(
+        'On iPhone/iPad, install Audiobooker to your Home Screen first, then open it from the icon and enable notifications.',
+      )
+    }
     throw new Error('Push notifications are not supported in this browser')
   }
   if (!window.isSecureContext && location.hostname !== 'localhost') {
@@ -33,7 +101,7 @@ export async function enableNotifications() {
   const permission = await Notification.requestPermission()
   if (permission !== 'granted') throw new Error('Notification permission denied')
 
-  const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+  const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
   await navigator.serviceWorker.ready
 
   const { vapid_public_key } = await api.ensureVapid()
@@ -41,7 +109,6 @@ export async function enableNotifications() {
 
   let sub = await reg.pushManager.getSubscription()
   if (sub) {
-    // Re-subscribe if the browser subscription is stale vs current VAPID key.
     try {
       await api.subscribePush(sub.toJSON())
       return sub
@@ -73,4 +140,8 @@ export async function disableNotifications() {
 
 export async function sendTestNotification() {
   await api.testPush()
+}
+
+export async function saveNotificationPrefs(prefs: NotificationPrefs) {
+  await api.updatePushPreferences(prefs)
 }

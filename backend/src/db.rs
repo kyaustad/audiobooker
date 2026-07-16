@@ -54,8 +54,31 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/004_pack_items.sql"),
     )
     .await?;
+    run_once(
+        pool,
+        "005_notification_prefs",
+        include_str!("../migrations/005_notification_prefs.sql"),
+    )
+    .await?;
+    run_once(
+        pool,
+        "006_abs_user_sync",
+        include_str!("../migrations/006_abs_user_sync.sql"),
+    )
+    .await?;
     ensure_column(pool, "downloads", "library_id", "INTEGER REFERENCES libraries(id)").await?;
     ensure_column(pool, "downloads", "kind", "TEXT NOT NULL DEFAULT 'single'").await?;
+    ensure_column(pool, "users", "notify_imported", "INTEGER NOT NULL DEFAULT 1").await?;
+    ensure_column(
+        pool,
+        "users",
+        "notify_download_finished",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(pool, "users", "notify_pack_ready", "INTEGER NOT NULL DEFAULT 1").await?;
+    ensure_column(pool, "users", "notify_failures", "INTEGER NOT NULL DEFAULT 1").await?;
+    ensure_column(pool, "users", "abs_user_id", "TEXT").await?;
     ensure_column(
         pool,
         "settings",
@@ -70,6 +93,35 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
         "TEXT NOT NULL DEFAULT ''",
     )
     .await?;
+    ensure_column(
+        pool,
+        "settings",
+        "abs_user_sync_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "settings",
+        "abs_user_sync_interval_ms",
+        "INTEGER NOT NULL DEFAULT 3600000",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "settings",
+        "abs_user_default_password",
+        "TEXT NOT NULL DEFAULT 'changeme'",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "settings",
+        "abs_user_sync_libraries",
+        "INTEGER NOT NULL DEFAULT 1",
+    )
+    .await?;
+    ensure_column(pool, "settings", "abs_user_last_sync_at", "TEXT").await?;
     // In case 003 was applied before Abs path column existed on old DBs that
     // skipped the migration file name, ensure column still lands.
     ensure_column(pool, "libraries", "abs_path", "TEXT").await?;

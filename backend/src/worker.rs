@@ -6,7 +6,8 @@ use sqlx::SqlitePool;
 
 use crate::files::{build_library_relative_path, copy_completed, resolve_download_source};
 use crate::models::{
-    BookMetadata, BookMetadataPublic, Download, DownloadItem, Library, Settings,
+    BookMetadata, BookMetadataPublic, Download, DownloadItem, Library, NotifyKind, Settings,
+    USER_COLUMNS, User,
 };
 use crate::push::{PushPayload, ensure_vapid_keys, notify_user};
 use crate::qbittorrent::{QbittorrentClient, map_state};
@@ -24,6 +25,10 @@ pub fn spawn_worker(pool: SqlitePool, qb: QbittorrentClient) {
 
             if let Err(err) = sync_once(&pool, &qb).await {
                 tracing::warn!(error = %err, "sync worker tick failed");
+            }
+
+            if let Err(err) = crate::abs_users::maybe_periodic_sync(&pool).await {
+                tracing::warn!(error = %err, "ABS user sync tick failed");
             }
 
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
@@ -83,6 +88,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
                     pool,
                     &settings,
                     download.user_id,
+                    NotifyKind::Failure,
                     "Download failed",
                     &format!(
                         "{} is no longer in qBittorrent",
@@ -179,6 +185,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
                 pool,
                 &settings,
                 download.user_id,
+                NotifyKind::Failure,
                 "Download failed",
                 &format!("{} failed in qBittorrent ({})", display_name(&download), torrent.state),
             )
@@ -186,22 +193,30 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         }
 
         if newly_completed {
-            let body = if download.kind == "pack" {
-                format!(
-                    "{} finished downloading — map books to import",
-                    display_name(&download)
+            if download.kind == "pack" {
+                push(
+                    pool,
+                    &settings,
+                    download.user_id,
+                    NotifyKind::PackReady,
+                    "Pack ready to map",
+                    &format!(
+                        "{} finished downloading — map books to import",
+                        display_name(&download)
+                    ),
                 )
+                .await;
             } else {
-                format!("{} finished downloading — importing…", display_name(&download))
-            };
-            push(
-                pool,
-                &settings,
-                download.user_id,
-                "Download finished",
-                &body,
-            )
-            .await;
+                push(
+                    pool,
+                    &settings,
+                    download.user_id,
+                    NotifyKind::DownloadFinished,
+                    "Download finished",
+                    &format!("{} finished downloading — importing…", display_name(&download)),
+                )
+                .await;
+            }
         }
 
         if torrent_completed
@@ -222,11 +237,44 @@ fn display_name(download: &Download) -> String {
         .unwrap_or_else(|| "Your audiobook".into())
 }
 
-async fn push(pool: &SqlitePool, settings: &Settings, user_id: i64, title: &str, body: &str) {
+async fn push(
+    pool: &SqlitePool,
+    settings: &Settings,
+    user_id: i64,
+    kind: NotifyKind,
+    title: &str,
+    body: &str,
+) {
+    let prefs = match sqlx::query_as::<_, User>(&format!(
+        "SELECT {USER_COLUMNS} FROM users WHERE id = ?"
+    ))
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(u)) => u.notification_prefs(),
+        Ok(None) => return,
+        Err(err) => {
+            tracing::warn!(error = %err, "load notify prefs failed");
+            return;
+        }
+    };
+    if !prefs.allows(kind) {
+        return;
+    }
+
+    let tag = match kind {
+        NotifyKind::Imported => "audiobooker-imported",
+        NotifyKind::DownloadFinished => "audiobooker-download",
+        NotifyKind::PackReady => "audiobooker-pack",
+        NotifyKind::Failure => "audiobooker-failure",
+    };
+
     let payload = PushPayload {
         title: title.into(),
         body: body.into(),
         url: "/#/".into(),
+        tag: Some(tag.into()),
     };
     if let Err(err) = notify_user(pool, settings, user_id, &payload).await {
         tracing::warn!(error = %err, %title, "push notify failed");
@@ -266,6 +314,7 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
             pool,
             settings,
             download.user_id,
+            NotifyKind::Failure,
             "Import failed",
             &format!(
                 "{} finished downloading but has no Audible match",
@@ -333,6 +382,7 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
                 pool,
                 settings,
                 download.user_id,
+                NotifyKind::Imported,
                 "Audiobook imported",
                 &format!("{} is ready in your library", public.title),
             )
@@ -351,6 +401,7 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
                 pool,
                 settings,
                 download.user_id,
+                NotifyKind::Failure,
                 "Import failed",
                 &format!("{} could not be copied into your library", public.title),
             )
@@ -452,6 +503,7 @@ async fn import_pack(
                     pool,
                     settings,
                     download.user_id,
+                    NotifyKind::Imported,
                     "Audiobook imported",
                     &format!("{} is ready in your library", public.title),
                 )
@@ -469,6 +521,7 @@ async fn import_pack(
                     pool,
                     settings,
                     download.user_id,
+                    NotifyKind::Failure,
                     "Import failed",
                     &format!("{} could not be copied into your library", public.title),
                 )

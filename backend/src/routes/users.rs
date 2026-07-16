@@ -76,7 +76,7 @@ async fn set_user_libraries(
 pub async fn list(State(state): State<AppState>, auth: AuthSession) -> AppResult<Json<Value>> {
     auth.require_root()?;
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, created_at, updated_at FROM users ORDER BY id",
+        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users ORDER BY id",
     )
     .fetch_all(&state.pool)
     .await?;
@@ -93,6 +93,7 @@ pub async fn list(State(state): State<AppState>, auth: AuthSession) -> AppResult
             "username": u.username,
             "role": u.role,
             "must_change_password": u.must_change_password,
+            "abs_user_id": u.abs_user_id,
             "created_at": u.created_at,
             "libraries": libraries,
             "library_ids": libraries.iter().map(|l| l.id).collect::<Vec<_>>(),
@@ -179,7 +180,7 @@ pub async fn update(
 ) -> AppResult<Json<Value>> {
     auth.require_root()?;
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, created_at, updated_at FROM users WHERE id = ?",
+        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -239,7 +240,7 @@ pub async fn delete(
 ) -> AppResult<Json<Value>> {
     auth.require_root()?;
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, created_at, updated_at FROM users WHERE id = ?",
+        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&state.pool)

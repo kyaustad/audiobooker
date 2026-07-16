@@ -22,6 +22,10 @@ pub struct UpdateSettingsRequest {
     pub vapid_subject: Option<String>,
     pub audiobookshelf_url: Option<String>,
     pub audiobookshelf_token: Option<String>,
+    pub abs_user_sync_enabled: Option<bool>,
+    pub abs_user_sync_interval_ms: Option<i64>,
+    pub abs_user_default_password: Option<String>,
+    pub abs_user_sync_libraries: Option<bool>,
 }
 
 pub async fn get(State(state): State<AppState>, auth: AuthSession) -> AppResult<Json<Value>> {
@@ -82,6 +86,26 @@ pub async fn update(
             settings.audiobookshelf_token = v;
         }
     }
+    if let Some(v) = body.abs_user_sync_enabled {
+        settings.abs_user_sync_enabled = v;
+    }
+    if let Some(v) = body.abs_user_sync_interval_ms {
+        settings.abs_user_sync_interval_ms = v.max(60_000);
+    }
+    if let Some(v) = body.abs_user_default_password {
+        let trimmed = v.trim().to_string();
+        if !trimmed.is_empty() {
+            if trimmed.len() < 8 {
+                return Err(AppError::BadRequest(
+                    "ABS sync default password must be at least 8 characters".into(),
+                ));
+            }
+            settings.abs_user_default_password = trimmed;
+        }
+    }
+    if let Some(v) = body.abs_user_sync_libraries {
+        settings.abs_user_sync_libraries = v;
+    }
 
     sqlx::query(
         r#"
@@ -98,6 +122,10 @@ pub async fn update(
             vapid_subject = ?,
             audiobookshelf_url = ?,
             audiobookshelf_token = ?,
+            abs_user_sync_enabled = ?,
+            abs_user_sync_interval_ms = ?,
+            abs_user_default_password = ?,
+            abs_user_sync_libraries = ?,
             updated_at = datetime('now')
         WHERE id = 1
         "#,
@@ -114,6 +142,10 @@ pub async fn update(
     .bind(&settings.vapid_subject)
     .bind(&settings.audiobookshelf_url)
     .bind(&settings.audiobookshelf_token)
+    .bind(settings.abs_user_sync_enabled)
+    .bind(settings.abs_user_sync_interval_ms)
+    .bind(&settings.abs_user_default_password)
+    .bind(settings.abs_user_sync_libraries)
     .execute(&state.pool)
     .await?;
 
@@ -182,4 +214,26 @@ pub async fn ensure_vapid(
     auth.require_root()?;
     let (public, _) = ensure_vapid_keys(&state.pool).await?;
     Ok(Json(json!({ "vapid_public_key": public })))
+}
+
+pub async fn sync_abs_users(
+    State(state): State<AppState>,
+    auth: AuthSession,
+) -> AppResult<Json<Value>> {
+    auth.require_root()?;
+    let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
+        .fetch_one(&state.pool)
+        .await?;
+    let result = crate::abs_users::sync_abs_users(&state.pool, &settings).await?;
+    let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
+        .fetch_one(&state.pool)
+        .await?;
+    Ok(Json(json!({
+        "created": result.created,
+        "linked": result.linked,
+        "updated_libraries": result.updated_libraries,
+        "skipped": result.skipped,
+        "total_abs_users": result.total_abs_users,
+        "settings": SettingsPublic::from(settings),
+    })))
 }

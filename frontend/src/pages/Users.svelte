@@ -140,6 +140,9 @@
               {#if u.must_change_password}
                 <span class="badge awaiting_match">must change password</span>
               {/if}
+              {#if u.abs_user_id}
+                <span class="badge completed">ABS</span>
+              {/if}
             </div>
             {#if u.role !== 'root'}
               <div class="muted user-libs">

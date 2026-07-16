@@ -1,6 +1,13 @@
 /* Audiobooker service worker — bump CACHE when shipping UI/API changes so PWAs refresh. */
-const CACHE = 'audiobooker-v2'
-const PRECACHE = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png']
+const CACHE = 'audiobooker-v3'
+const PRECACHE = [
+  '/',
+  '/index.html',
+  '/manifest.webmanifest',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
+  '/icons/badge-96.png',
+]
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -79,7 +86,7 @@ self.addEventListener('fetch', (event) => {
 })
 
 self.addEventListener('push', (event) => {
-  let data = { title: 'Audiobooker', body: 'Download update', url: '/#/' }
+  let data = { title: 'Audiobooker', body: 'Download update', url: '/#/', tag: 'audiobooker' }
   try {
     if (event.data) data = { ...data, ...event.data.json() }
   } catch (_) {}
@@ -87,7 +94,10 @@ self.addEventListener('push', (event) => {
     self.registration.showNotification(data.title, {
       body: data.body,
       icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      // Android status bar needs a simple white-on-transparent silhouette.
+      badge: '/icons/badge-96.png',
+      tag: data.tag || 'audiobooker',
+      renotify: Boolean(data.tag),
       data: { url: data.url || '/#/' },
     }),
   )
@@ -102,11 +112,15 @@ self.addEventListener('notificationclick', (event) => {
       for (const client of all) {
         if ('focus' in client) {
           await client.focus()
+          try {
+            // Hash-SPA: postMessage is more reliable than navigate() on iOS.
+            client.postMessage({ type: 'NOTIFICATION_NAV', url: target })
+          } catch (_) {}
           if ('navigate' in client) {
             try {
               await client.navigate(target)
             } catch (_) {
-              /* older browsers */
+              /* older browsers / iOS */
             }
           }
           return

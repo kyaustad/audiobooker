@@ -3,8 +3,16 @@ export type User = {
   username: string
   role: string
   must_change_password: boolean
+  abs_user_id?: string | null
   libraries?: Library[]
   library_ids?: number[]
+}
+
+export type NotificationPrefs = {
+  notify_imported: boolean
+  notify_download_finished: boolean
+  notify_pack_ready: boolean
+  notify_failures: boolean
 }
 
 export type Library = {
@@ -134,9 +142,21 @@ export const api = {
         body: JSON.stringify(body ?? {}),
       },
     ),
+  syncAbsUsers: () =>
+    request<{
+      created: number
+      linked: number
+      updated_libraries: number
+      skipped: number
+      total_abs_users: number
+      settings: Record<string, unknown>
+    }>('/settings/sync-abs-users', { method: 'POST' }),
   getSettings: () => request<{ settings: Record<string, unknown> }>('/settings'),
   updateSettings: (body: Record<string, unknown>) =>
-    request('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+    request<{ settings: Record<string, unknown> }>('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
   testQbit: (body?: {
     qbittorrent_url?: string
     qbittorrent_username?: string
@@ -214,7 +234,17 @@ export const api = {
     }>(`/abb/search?q=${encodeURIComponent(q)}&page=${page}`),
   abbDetails: (url: string) =>
     request<{ details: AbbDetails }>(`/abb/details?url=${encodeURIComponent(url)}`),
-  pushStatus: () => request<{ subscribed: boolean; subscriptions: number }>('/push/status'),
+  pushStatus: () =>
+    request<{
+      subscribed: boolean
+      subscriptions: number
+      preferences: NotificationPrefs
+    }>('/push/status'),
+  updatePushPreferences: (preferences: NotificationPrefs) =>
+    request<{ ok: boolean; preferences: NotificationPrefs }>('/push/preferences', {
+      method: 'PUT',
+      body: JSON.stringify(preferences),
+    }),
   subscribePush: (subscription: PushSubscriptionJSON) =>
     request('/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) }),
   unsubscribePush: (endpoint?: string) =>

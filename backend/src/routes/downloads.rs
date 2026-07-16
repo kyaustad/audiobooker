@@ -176,7 +176,7 @@ pub async fn list_for_username(
 ) -> AppResult<Json<Value>> {
     auth.require_root()?;
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, created_at, updated_at FROM users WHERE username = ? COLLATE NOCASE",
+        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users WHERE username = ? COLLATE NOCASE",
     )
     .bind(username)
     .fetch_optional(&state.pool)
