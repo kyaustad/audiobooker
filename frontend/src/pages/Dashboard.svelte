@@ -33,6 +33,7 @@
   let prefsBusy = $state(false)
   let tab = $state<Tab>('all')
   let removingId = $state<number | null>(null)
+  let refreshingId = $state<number | null>(null)
   let timer: number | undefined
 
   const SEEDING_STATUSES = new Set(['completed', 'copying', 'imported', 'awaiting_map', 'partial'])
@@ -138,6 +139,23 @@
       showToast(err instanceof Error ? err.message : 'Failed to remove')
     } finally {
       removingId = null
+    }
+  }
+
+  async function refreshQbit(d: Download) {
+    refreshingId = d.id
+    try {
+      const data = await api.refreshQbittorrent(d.id)
+      showToast(
+        data.paths_changed
+          ? `Updated paths from qBit${data.requeued_items ? ` · requeued ${data.requeued_items}` : ''}`
+          : `Synced from qBit (${data.qb_state})${data.requeued_items ? ` · requeued ${data.requeued_items}` : ''}`,
+      )
+      await refresh()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'qBit refresh failed')
+    } finally {
+      refreshingId = null
     }
   }
 
@@ -377,8 +395,20 @@
           <div class="actions">
             {#if d.status === 'awaiting_match'}
               <a class="btn" href={`#/match/${d.id}`}>Match</a>
-            {:else if isPack(d) && ['queued', 'downloading', 'completed', 'awaiting_map', 'partial'].includes(d.status)}
-              <a class="btn" href={`#/map/${d.id}`}>Map</a>
+            {:else if isPack(d) && d.status !== 'awaiting_match'}
+              <a class="btn" href={`#/map/${d.id}`}>
+                {d.status === 'imported' || d.status === 'partial' ? 'Map more' : 'Map'}
+              </a>
+            {/if}
+            {#if d.status !== 'awaiting_match'}
+              <button
+                class="secondary"
+                type="button"
+                disabled={refreshingId === d.id}
+                onclick={() => refreshQbit(d)}
+              >
+                {refreshingId === d.id ? '…' : 'Refresh qBit'}
+              </button>
             {/if}
             {#if canRemove(d)}
               <button class="danger" type="button" disabled={removingId === d.id} onclick={() => remove(d)}>

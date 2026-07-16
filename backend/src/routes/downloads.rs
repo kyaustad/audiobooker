@@ -14,6 +14,7 @@ use crate::models::{
     BookMetadata, Download, DownloadItem, DownloadItemWithMetadata, DownloadWithMetadata, Library,
     Settings, User,
 };
+use crate::qbittorrent::{QbTorrent, map_state};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -352,16 +353,45 @@ pub async fn list_files(
     if auth.user.is_root() {
         return Err(AppError::Forbidden);
     }
-    let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    let mut download = load_user_download(&state.pool, auth.user.id, id).await?;
     let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
         .fetch_one(&state.pool)
         .await?;
+
+    // Refresh save/content paths from qBit so incomplete→complete moves are visible.
+    if !settings.qbittorrent_url.is_empty() {
+        if let Ok(torrents) = state
+            .qb
+            .list_torrents(
+                &settings.qbittorrent_url,
+                &settings.qbittorrent_username,
+                &settings.qbittorrent_password,
+            )
+            .await
+        {
+            if let Some(torrent) = torrents
+                .iter()
+                .find(|t| t.hash.eq_ignore_ascii_case(&download.info_hash))
+            {
+                sqlx::query(
+                    "UPDATE downloads SET save_path = ?, content_path = ?, updated_at = datetime('now') WHERE id = ?",
+                )
+                .bind(&torrent.save_path)
+                .bind(&torrent.content_path)
+                .bind(download.id)
+                .execute(&state.pool)
+                .await?;
+                download.save_path = Some(torrent.save_path.clone());
+                download.content_path = Some(torrent.content_path.clone());
+            }
+        }
+    }
 
     let mut entries = Vec::new();
     let mut source = "none";
 
     if !settings.qbittorrent_url.is_empty()
-        && !matches!(download.status.as_str(), "awaiting_match" | "error")
+        && !matches!(download.status.as_str(), "awaiting_match")
     {
         if let Ok(files) = state
             .qb
@@ -400,7 +430,259 @@ pub async fn list_files(
         "files": entries,
         "source": source,
         "content_path": download.content_path,
+        "save_path": download.save_path,
     })))
+}
+
+pub async fn retry_pack_imports(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(AppError::Forbidden);
+    }
+    let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    if download.kind != "pack" {
+        return Err(AppError::BadRequest("Only pack downloads support retry".into()));
+    }
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE download_items SET
+            status = 'ready',
+            error_message = NULL,
+            updated_at = datetime('now')
+        WHERE download_id = ? AND status = 'error'
+        "#,
+    )
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    if updated == 0 {
+        return Err(AppError::BadRequest("No failed imports to retry".into()));
+    }
+
+    sqlx::query(
+        "UPDATE downloads SET status = 'completed', error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?;
+
+    let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(download.id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(Json(json!({
+        "retried": updated,
+        "download": attach_metadata(&state.pool, download).await?
+    })))
+}
+
+/// Pull live save/content paths from qBittorrent and requeue path-related pack failures.
+/// Fixes existing installs stuck pointing at `/incomplete` after the torrent finished.
+pub async fn refresh_qbittorrent(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(AppError::Forbidden);
+    }
+    let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
+        .fetch_one(&state.pool)
+        .await?;
+
+    if settings.qbittorrent_url.is_empty() {
+        return Err(AppError::BadRequest("qBittorrent is not configured".into()));
+    }
+
+    let torrents = state
+        .qb
+        .list_torrents(
+            &settings.qbittorrent_url,
+            &settings.qbittorrent_username,
+            &settings.qbittorrent_password,
+        )
+        .await?;
+    let torrent = torrents
+        .iter()
+        .find(|t| t.hash.eq_ignore_ascii_case(&download.info_hash))
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "Torrent not found in qBittorrent — it may have been removed".into(),
+            )
+        })?;
+
+    let result = apply_qbittorrent_refresh(&state.pool, &download, torrent).await?;
+
+    let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(download.id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "save_path": result.save_path,
+        "content_path": result.content_path,
+        "progress": result.progress,
+        "qb_state": result.qb_state,
+        "requeued_items": result.requeued_items,
+        "paths_changed": result.paths_changed,
+        "download": attach_metadata(&state.pool, download).await?,
+    })))
+}
+
+struct QbitRefreshResult {
+    save_path: String,
+    content_path: String,
+    progress: f64,
+    qb_state: String,
+    requeued_items: u64,
+    paths_changed: bool,
+}
+
+async fn apply_qbittorrent_refresh(
+    pool: &sqlx::SqlitePool,
+    download: &Download,
+    torrent: &QbTorrent,
+) -> AppResult<QbitRefreshResult> {
+    let old_save = download.save_path.clone().unwrap_or_default();
+    let old_content = download.content_path.clone().unwrap_or_default();
+    let paths_changed = old_save != torrent.save_path || old_content != torrent.content_path;
+
+    let mapped = map_state(&torrent.state, torrent.progress);
+    let torrent_completed = mapped == "completed";
+
+    let status = if matches!(
+        download.status.as_str(),
+        "awaiting_match" | "imported" | "copying"
+    ) {
+        download.status.clone()
+    } else if download.kind == "pack"
+        && torrent_completed
+        && matches!(
+            download.status.as_str(),
+            "awaiting_map" | "partial" | "completed" | "error"
+        )
+    {
+        // Keep pack mapping statuses; bump error packs back to completed so imports retry.
+        if download.status == "error" {
+            "completed".into()
+        } else {
+            download.status.clone()
+        }
+    } else if torrent_completed {
+        "completed".into()
+    } else {
+        mapped.to_string()
+    };
+
+    let completed_at = if torrent_completed && download.completed_at.is_none() {
+        Some(chrono::Utc::now().to_rfc3339())
+    } else {
+        download.completed_at.clone()
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE downloads SET
+            name = ?,
+            progress = ?,
+            download_speed = ?,
+            eta = ?,
+            save_path = ?,
+            content_path = ?,
+            status = ?,
+            error_message = CASE WHEN ? = 'error' THEN ? ELSE NULL END,
+            completed_at = COALESCE(?, completed_at),
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(&torrent.name)
+    .bind(torrent.progress)
+    .bind(torrent.dlspeed)
+    .bind(torrent.eta)
+    .bind(&torrent.save_path)
+    .bind(&torrent.content_path)
+    .bind(&status)
+    .bind(mapped)
+    .bind(format!("qBittorrent state: {}", torrent.state))
+    .bind(completed_at)
+    .bind(download.id)
+    .execute(pool)
+    .await?;
+
+    let mut requeued_items = 0u64;
+    if download.kind == "pack" {
+        if torrent_completed {
+            let pending = sqlx::query(
+                "UPDATE download_items SET status = 'ready', updated_at = datetime('now') WHERE download_id = ? AND status = 'pending'",
+            )
+            .bind(download.id)
+            .execute(pool)
+            .await?
+            .rows_affected();
+            requeued_items += pending;
+        }
+
+        // Requeue failed imports after a path refresh (incomplete → complete).
+        let failed = sqlx::query(
+            r#"
+            UPDATE download_items SET
+                status = 'ready',
+                error_message = NULL,
+                updated_at = datetime('now')
+            WHERE download_id = ?
+              AND status = 'error'
+              AND (
+                error_message LIKE '%incomplete%'
+                OR error_message LIKE '%Source not found%'
+                OR error_message LIKE '%does not exist%'
+                OR ? = 1
+              )
+            "#,
+        )
+        .bind(download.id)
+        .bind(if paths_changed || torrent_completed {
+            1
+        } else {
+            0
+        })
+        .execute(pool)
+        .await?
+        .rows_affected();
+        requeued_items += failed;
+
+        if requeued_items > 0
+            && matches!(
+                status.as_str(),
+                "awaiting_map" | "partial" | "completed" | "imported" | "error"
+            )
+        {
+            sqlx::query(
+                "UPDATE downloads SET status = 'completed', updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(download.id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    Ok(QbitRefreshResult {
+        save_path: torrent.save_path.clone(),
+        content_path: torrent.content_path.clone(),
+        progress: torrent.progress,
+        qb_state: torrent.state.clone(),
+        requeued_items,
+        paths_changed,
+    })
 }
 
 pub async fn map_item(
@@ -418,10 +700,7 @@ pub async fn map_item(
             "Only pack downloads support file mapping".into(),
         ));
     }
-    if matches!(
-        download.status.as_str(),
-        "awaiting_match" | "error"
-    ) {
+    if download.status == "awaiting_match" {
         return Err(AppError::BadRequest(
             "Start the pack download before mapping books".into(),
         ));
@@ -443,8 +722,9 @@ pub async fn map_item(
 
     let item_status = if matches!(
         download.status.as_str(),
-        "completed" | "awaiting_map" | "partial" | "imported"
-    ) {
+        "completed" | "awaiting_map" | "partial" | "imported" | "error"
+    ) || download.progress >= 1.0
+    {
         "ready"
     } else {
         "pending"
@@ -493,10 +773,19 @@ pub async fn map_item(
     .execute(&state.pool)
     .await?;
 
-    // Bump pack status so worker notices newly ready items on completed torrents.
-    if item_status == "ready" && matches!(download.status.as_str(), "awaiting_map" | "partial" | "completed") {
+    // Bump pack status so worker notices newly ready items (including after a prior full import).
+    if item_status == "ready" {
         sqlx::query(
-            "UPDATE downloads SET status = 'completed', updated_at = datetime('now') WHERE id = ? AND status IN ('awaiting_map', 'partial', 'completed')",
+            r#"
+            UPDATE downloads SET
+                status = CASE
+                    WHEN status IN ('imported', 'awaiting_map', 'partial', 'completed') THEN 'completed'
+                    ELSE status
+                END,
+                error_message = NULL,
+                updated_at = datetime('now')
+            WHERE id = ?
+            "#,
         )
         .bind(download.id)
         .execute(&state.pool)
@@ -537,10 +826,46 @@ pub async fn unmap_item(
         ));
     }
 
+    sqlx::query("DELETE FROM book_metadata WHERE download_item_id = ?")
+        .bind(item.id)
+        .execute(&state.pool)
+        .await?;
     sqlx::query("DELETE FROM download_items WHERE id = ?")
         .bind(item.id)
         .execute(&state.pool)
         .await?;
+
+    let remaining: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM download_items WHERE download_id = ? AND status != 'imported'",
+    )
+    .bind(download.id)
+    .fetch_one(&state.pool)
+    .await?;
+    let imported: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM download_items WHERE download_id = ? AND status = 'imported'",
+    )
+    .bind(download.id)
+    .fetch_one(&state.pool)
+    .await?;
+    let new_status = if imported.0 > 0 && remaining.0 > 0 {
+        "partial"
+    } else if imported.0 > 0 {
+        "imported"
+    } else if matches!(
+        download.status.as_str(),
+        "queued" | "downloading" | "completed"
+    ) {
+        download.status.as_str()
+    } else {
+        "awaiting_map"
+    };
+    sqlx::query(
+        "UPDATE downloads SET status = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(new_status)
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?;
 
     let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
         .bind(download.id)

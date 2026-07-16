@@ -52,6 +52,11 @@ pub fn router(state: AppState) -> Router {
         .route("/downloads/{id}/match", post(downloads::match_metadata))
         .route("/downloads/{id}/start-pack", post(downloads::start_pack))
         .route("/downloads/{id}/files", get(downloads::list_files))
+        .route("/downloads/{id}/retry-imports", post(downloads::retry_pack_imports))
+        .route(
+            "/downloads/{id}/refresh-qbittorrent",
+            post(downloads::refresh_qbittorrent),
+        )
         .route("/downloads/{id}/items", post(downloads::map_item))
         .route(
             "/downloads/{id}/items/{item_id}",

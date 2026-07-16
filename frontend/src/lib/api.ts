@@ -186,9 +186,27 @@ export const api = {
   startPack: (id: number) =>
     request<{ download: Download }>(`/downloads/${id}/start-pack`, { method: 'POST' }),
   downloadFiles: (id: number) =>
-    request<{ files: ContentEntry[]; source: string; content_path?: string | null }>(
-      `/downloads/${id}/files`,
-    ),
+    request<{
+      files: ContentEntry[]
+      source: string
+      content_path?: string | null
+      save_path?: string | null
+    }>(`/downloads/${id}/files`),
+  retryPackImports: (id: number) =>
+    request<{ retried: number; download: Download }>(`/downloads/${id}/retry-imports`, {
+      method: 'POST',
+    }),
+  refreshQbittorrent: (id: number) =>
+    request<{
+      ok: boolean
+      save_path: string
+      content_path: string
+      progress: number
+      qb_state: string
+      requeued_items: number
+      paths_changed: boolean
+      download: Download
+    }>(`/downloads/${id}/refresh-qbittorrent`, { method: 'POST' }),
   mapDownloadItem: (
     id: number,
     body: { source_path: string; match_data: unknown; library_id?: number },

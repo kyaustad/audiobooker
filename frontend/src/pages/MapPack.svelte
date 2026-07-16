@@ -6,10 +6,19 @@
 
   let { params = { id: '' } }: { params?: { id: string } } = $props()
 
+  type TreeNode = {
+    name: string
+    path: string
+    is_dir: boolean
+    size: number
+    children: TreeNode[]
+  }
+
   let download = $state<Download | null>(null)
   let libraries = $state<Library[]>([])
   let files = $state<ContentEntry[]>([])
   let filesSource = $state('none')
+  let contentPath = $state<string | null>(null)
   let loading = $state(true)
   let selectedPath = $state<string | null>(null)
   let title = $state('')
@@ -18,25 +27,114 @@
   let matches = $state<any[]>([])
   let searching = $state(false)
   let saving = $state(false)
+  let retrying = $state(false)
+  let refreshingQbit = $state(false)
   let libraryId = $state<number | null>(null)
+  let expanded = $state<Set<string>>(new Set())
   let timer: number | undefined
 
   const mappedPaths = $derived(new Set((download?.items || []).map((i) => i.source_path)))
+  const failedCount = $derived(
+    (download?.items || []).filter((i) => i.status === 'error').length,
+  )
+  const tree = $derived(buildTree(files))
 
-  const topDirs = $derived(
-    files.filter((f) => f.is_dir && !f.path.includes('/')),
-  )
-  const showFiles = $derived(
-    topDirs.length ? topDirs : files.filter((f) => !f.path.includes('/') || f.is_dir),
-  )
+  function stripExtension(name: string) {
+    return name.replace(/\.(m4b|m4a|mp3|flac|ogg|opus|aac|wma|wav|mp4|mka|pdf|epub)$/i, '')
+  }
 
   function parseFolderName(path: string) {
-    const name = path.split('/').filter(Boolean).pop() || path
+    const raw = path.split('/').filter(Boolean).pop() || path
+    const name = stripExtension(raw)
     const idx = name.lastIndexOf(' - ')
     if (idx > 0) {
-      return { title: name.slice(0, idx).trim(), author: name.slice(idx + 3).trim() }
+      return {
+        title: stripExtension(name.slice(0, idx).trim()),
+        author: stripExtension(name.slice(idx + 3).trim()),
+      }
     }
     return { title: name, author: '' }
+  }
+
+  function buildTree(entries: ContentEntry[]): TreeNode[] {
+    type Mutable = TreeNode & { map: Map<string, Mutable> }
+    const root: Mutable = {
+      name: '',
+      path: '',
+      is_dir: true,
+      size: 0,
+      children: [],
+      map: new Map(),
+    }
+
+    const ensureDir = (parent: Mutable, name: string, path: string) => {
+      let node = parent.map.get(name)
+      if (!node) {
+        node = { name, path, is_dir: true, size: 0, children: [], map: new Map() }
+        parent.map.set(name, node)
+        parent.children.push(node)
+      }
+      return node
+    }
+
+    for (const entry of entries) {
+      const parts = entry.path.split('/').filter(Boolean)
+      if (!parts.length) continue
+      let cursor = root
+      let acc = ''
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i]
+        acc = acc ? `${acc}/${part}` : part
+        const isLast = i === parts.length - 1
+        if (isLast && !entry.is_dir) {
+          if (!cursor.map.has(part)) {
+            const fileNode: Mutable = {
+              name: part,
+              path: entry.path,
+              is_dir: false,
+              size: entry.size,
+              children: [],
+              map: new Map(),
+            }
+            cursor.map.set(part, fileNode)
+            cursor.children.push(fileNode)
+          }
+        } else {
+          cursor = ensureDir(cursor, part, acc)
+          if (isLast && entry.is_dir) {
+            cursor.is_dir = true
+          }
+        }
+      }
+    }
+
+    const sortNodes = (nodes: TreeNode[]) => {
+      nodes.sort((a, b) => {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+      })
+      for (const n of nodes) sortNodes(n.children)
+    }
+    sortNodes(root.children)
+    return root.children
+  }
+
+  function toggleExpand(path: string) {
+    const next = new Set(expanded)
+    if (next.has(path)) next.delete(path)
+    else next.add(path)
+    expanded = next
+  }
+
+  function expandDefaults(nodes: TreeNode[], depth = 0) {
+    const next = new Set(expanded)
+    for (const n of nodes) {
+      if (n.is_dir && depth < 1) {
+        next.add(n.path)
+        expandDefaults(n.children, depth + 1)
+      }
+    }
+    expanded = next
   }
 
   async function refresh() {
@@ -44,15 +142,24 @@
     const [data, libs, fileData] = await Promise.all([
       api.getDownload(id),
       api.myLibraries(),
-      api.downloadFiles(id).catch(() => ({ files: [] as ContentEntry[], source: 'none' })),
+      api.downloadFiles(id).catch(() => ({
+        files: [] as ContentEntry[],
+        source: 'none',
+        content_path: null,
+      })),
     ])
     download = data.download
     libraries = libs.libraries
     files = fileData.files
     filesSource = fileData.source
+    contentPath = fileData.content_path ?? null
     if (libraries.length === 1) libraryId = libraries[0].id
     if (download.kind !== 'pack') {
       push(`/match/${id}`)
+      return
+    }
+    if (expanded.size === 0 && fileData.files.length) {
+      expandDefaults(buildTree(fileData.files))
     }
   }
 
@@ -138,11 +245,56 @@
     }
   }
 
+  async function retryFailed() {
+    retrying = true
+    try {
+      const data = await api.retryPackImports(Number(params.id))
+      download = data.download
+      showToast(`Retrying ${data.retried} failed import${data.retried === 1 ? '' : 's'}`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Retry failed')
+    } finally {
+      retrying = false
+    }
+  }
+
+  async function refreshFromQbit() {
+    refreshingQbit = true
+    try {
+      const data = await api.refreshQbittorrent(Number(params.id))
+      download = data.download
+      contentPath = data.content_path
+      const fileData = await api.downloadFiles(Number(params.id)).catch(() => ({
+        files: [] as ContentEntry[],
+        source: 'none',
+        content_path: data.content_path,
+      }))
+      files = fileData.files
+      filesSource = fileData.source
+      showToast(
+        data.paths_changed
+          ? `Paths updated from qBit${data.requeued_items ? ` · requeued ${data.requeued_items}` : ''}`
+          : `Synced from qBit (${data.qb_state})${data.requeued_items ? ` · requeued ${data.requeued_items}` : ''}`,
+      )
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'qBit refresh failed')
+    } finally {
+      refreshingQbit = false
+    }
+  }
+
   function formatSize(n: number) {
     if (!n) return ''
     const u = ['B', 'KB', 'MB', 'GB']
     const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1)
     return `${(n / 1024 ** i).toFixed(1)} ${u[i]}`
+  }
+
+  function childMappedCount(node: TreeNode): number {
+    if (!node.is_dir) return mappedPaths.has(node.path) ? 1 : 0
+    let n = mappedPaths.has(node.path) ? 1 : 0
+    for (const c of node.children) n += childMappedCount(c)
+    return n
   }
 </script>
 
@@ -150,96 +302,86 @@
   <div class="card muted">Loading pack map…</div>
 {:else}
   <div class="card stack">
-    <div class="row" style="justify-content:space-between;align-items:start">
+    <div class="header-row">
       <div>
         <h2>Map pack books</h2>
         <p class="muted">
-          {download.name || 'Pack torrent'} · <span class="badge {download.status}">{download.status.replaceAll('_', ' ')}</span>
+          {download.name || 'Pack torrent'} ·
+          <span class="badge {download.status}">{download.status.replaceAll('_', ' ')}</span>
           · files from {filesSource}
         </p>
         <p class="muted">
-          Select a folder (or file), match it on Audible, and save. Imports run automatically after the torrent finishes for each mapped item.
+          Map folders that contain a whole book (multi-file) or individual files. You can keep mapping
+          after the download finishes — imports retry when paths move from incomplete → complete.
         </p>
+        {#if contentPath}
+          <p class="muted tiny path-hint">Current qBit path: <code>{contentPath}</code></p>
+        {/if}
       </div>
-      <a class="btn secondary" href="#/">Back to queue</a>
+      <div class="header-actions">
+        <button class="secondary" type="button" disabled={refreshingQbit} onclick={refreshFromQbit}>
+          {refreshingQbit ? 'Refreshing…' : 'Refresh from qBit'}
+        </button>
+        {#if failedCount > 0}
+          <button class="secondary" type="button" disabled={retrying} onclick={retryFailed}>
+            {retrying ? 'Retrying…' : `Retry ${failedCount} failed`}
+          </button>
+        {/if}
+        <a class="btn secondary" href="#/">Back to queue</a>
+      </div>
     </div>
   </div>
 
   <div class="map-layout">
-    <div class="card stack">
-      <h3>Sources</h3>
+    <div class="card stack sources-card">
+      <div class="sources-head">
+        <h3>Torrent contents</h3>
+        <div class="sources-actions">
+          <button class="secondary tiny-btn" type="button" disabled={refreshingQbit} onclick={refreshFromQbit}>
+            {refreshingQbit ? '…' : 'Refresh qBit'}
+          </button>
+          <button class="secondary tiny-btn" type="button" onclick={() => refresh()}>Reload list</button>
+        </div>
+      </div>
+
       {#if !files.length}
-        <p class="muted">No files yet — wait until qBittorrent has metadata or the download completes, then refresh.</p>
-        <button class="secondary" type="button" onclick={() => refresh()}>Refresh files</button>
+        <p class="muted">No files yet — wait until qBittorrent has metadata, then refresh.</p>
       {:else}
-        <div class="file-list">
-          {#each showFiles as f}
-            {@const mapped = mappedPaths.has(f.path)}
-            <button
-              type="button"
-              class="file-row"
-              class:selected={selectedPath === f.path}
-              class:mapped
-              disabled={mapped}
-              onclick={() => selectSource(f.path)}
-            >
-              <span class="file-kind">{f.is_dir ? 'DIR' : 'FILE'}</span>
-              <span class="file-name">{f.path}</span>
-              {#if mapped}<em>mapped</em>{/if}
-              {#if !f.is_dir && f.size}<span class="muted">{formatSize(f.size)}</span>{/if}
-            </button>
+        <div class="tree" role="tree">
+          {#each tree as node}
+            {@render treeNode(node, 0)}
           {/each}
         </div>
-        {#if files.some((f) => f.path.includes('/'))}
-          <details>
-            <summary class="muted">All paths ({files.length})</summary>
-            <div class="file-list">
-              {#each files as f}
-                {@const mapped = mappedPaths.has(f.path)}
-                <button
-                  type="button"
-                  class="file-row"
-                  class:selected={selectedPath === f.path}
-                  class:mapped
-                  disabled={mapped}
-                  onclick={() => selectSource(f.path)}
-                >
-                  <span class="file-kind">{f.is_dir ? 'DIR' : 'FILE'}</span>
-                  <span class="file-name">{f.path}</span>
-                  {#if mapped}<em>mapped</em>{/if}
-                </button>
-              {/each}
-            </div>
-          </details>
-        {/if}
       {/if}
 
       <h3>Mapped ({download.items?.length || 0})</h3>
       {#if !download.items?.length}
-        <p class="muted">Nothing mapped yet.</p>
+        <p class="muted">Nothing mapped yet — select a folder or file above.</p>
       {:else}
-        {#each download.items as item}
-          <div class="mapped-row">
-            <div>
-              <strong>{item.metadata?.title || item.source_path}</strong>
-              <div class="muted">{item.source_path}</div>
-              <span class="badge {item.status}">{item.status}</span>
-              {#if item.error_message}
-                <div style="color:var(--danger);font-size:0.85rem">{item.error_message}</div>
+        <div class="mapped-list">
+          {#each download.items as item}
+            <div class="mapped-row" class:failed={item.status === 'error'}>
+              <div>
+                <strong>{item.metadata?.title || item.source_path}</strong>
+                <div class="muted path-line">{item.source_path}</div>
+                <span class="badge {item.status}">{item.status}</span>
+                {#if item.error_message}
+                  <div class="err">{item.error_message}</div>
+                {/if}
+              </div>
+              {#if item.status !== 'imported' && item.status !== 'copying'}
+                <button class="danger" type="button" onclick={() => unmap(item.id)}>Unmap</button>
               {/if}
             </div>
-            {#if item.status !== 'imported' && item.status !== 'copying'}
-              <button class="danger" type="button" onclick={() => unmap(item.id)}>Unmap</button>
-            {/if}
-          </div>
-        {/each}
+          {/each}
+        </div>
       {/if}
     </div>
 
     <div class="card stack">
       <h3>Audible match{#if selectedPath} for <code>{selectedPath}</code>{/if}</h3>
       {#if !selectedPath}
-        <p class="muted">Select a source path on the left.</p>
+        <p class="muted">Select a folder or file in the tree.</p>
       {:else}
         {#if libraries.length > 1}
           <label>Library
@@ -260,15 +402,13 @@
           <p class="muted">Library: {libraries[0].name}</p>
         {/if}
 
-        <form class="stack" onsubmit={search}>
-          <div class="row">
-            <label>Title
-              <input bind:value={title} />
-            </label>
-            <label>Author
-              <input bind:value={author} />
-            </label>
-          </div>
+        <form class="stack match-fields" onsubmit={search}>
+          <label>Title
+            <input bind:value={title} />
+          </label>
+          <label>Author
+            <input bind:value={author} />
+          </label>
           <label>Or ASIN
             <input bind:value={asin} />
           </label>
@@ -291,54 +431,263 @@
   </div>
 {/if}
 
+{#snippet treeNode(node: TreeNode, depth: number)}
+  {@const mapped = mappedPaths.has(node.path)}
+  {@const isOpen = expanded.has(node.path)}
+  {@const nestedMapped = node.is_dir ? childMappedCount(node) : 0}
+  <div
+    class="tree-node"
+    style={`--depth:${depth}`}
+    role="treeitem"
+    aria-selected={selectedPath === node.path}
+    aria-expanded={node.is_dir ? isOpen : undefined}
+  >
+    <div
+      class="tree-row"
+      class:dir={node.is_dir}
+      class:file={!node.is_dir}
+      class:selected={selectedPath === node.path}
+      class:mapped
+    >
+      {#if node.is_dir}
+        <button
+          type="button"
+          class="twist"
+          aria-label={isOpen ? 'Collapse' : 'Expand'}
+          onclick={() => toggleExpand(node.path)}
+        >
+          {isOpen ? '▾' : '▸'}
+        </button>
+      {:else}
+        <span class="twist spacer" aria-hidden="true"></span>
+      {/if}
+
+      <button
+        type="button"
+        class="pick"
+        disabled={mapped}
+        onclick={() => selectSource(node.path)}
+      >
+        <span class="icon" class:folder={node.is_dir} class:audio={!node.is_dir} aria-hidden="true"></span>
+        <span class="label">{node.name}</span>
+        {#if node.is_dir}
+          <span class="meta">{node.children.length}</span>
+          {#if nestedMapped > 0}<span class="meta mapped-meta">{nestedMapped} mapped</span>{/if}
+        {:else if node.size}
+          <span class="meta">{formatSize(node.size)}</span>
+        {/if}
+        {#if mapped}<span class="mapped-pill">mapped</span>{/if}
+      </button>
+    </div>
+
+    {#if node.is_dir && isOpen}
+      <div class="tree-children" role="group">
+        {#each node.children as child}
+          {@render treeNode(child, depth + 1)}
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
 <style>
+  .header-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: start;
+    flex-wrap: wrap;
+  }
+  .header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .path-hint {
+    margin: 0.35rem 0 0;
+    word-break: break-all;
+  }
   .map-layout {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1.1fr 0.9fr;
     gap: 1rem;
     align-items: start;
   }
-  .file-list {
-    display: grid;
-    gap: 0.35rem;
-    max-height: 28rem;
-    overflow: auto;
-  }
-  .file-row {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: 0.45rem;
+  .sources-head {
+    display: flex;
+    justify-content: space-between;
     align-items: center;
+    gap: 0.5rem;
+  }
+  .sources-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .sources-head h3 {
+    margin: 0;
+  }
+  .tiny-btn {
+    padding: 0.35rem 0.65rem !important;
+    font-size: 0.82rem;
+  }
+  .tree {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background:
+      linear-gradient(180deg, color-mix(in oklab, var(--bg-elevated) 80%, transparent), transparent 8rem),
+      var(--bg);
+    max-height: min(34rem, 70vh);
+    overflow: auto;
+    padding: 0.45rem 0.35rem;
+  }
+  .tree-node {
+    --depth: 0;
+  }
+  .tree-children {
+    border-left: 1px dashed color-mix(in oklab, var(--border) 80%, transparent);
+    margin-left: calc(0.85rem + (var(--depth) * 0.05rem));
+  }
+  .tree-row {
+    display: grid;
+    grid-template-columns: 1.5rem 1fr;
+    gap: 0.15rem;
+    align-items: stretch;
+    padding-left: calc(var(--depth) * 0.85rem);
+  }
+  .twist {
+    width: 1.5rem;
+    height: 2rem;
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    color: var(--muted) !important;
+    font-size: 0.85rem;
+    line-height: 1;
+  }
+  .twist.spacer {
+    display: inline-block;
+  }
+  .pick {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
     text-align: left;
-    background: var(--bg) !important;
+    min-width: 0;
+    background: transparent !important;
     color: var(--text) !important;
-    border: 1px solid var(--border) !important;
+    border: 1px solid transparent !important;
     border-radius: 8px;
-    padding: 0.45rem 0.55rem !important;
-    font-weight: 400;
+    padding: 0.4rem 0.55rem !important;
+    font-weight: 500;
   }
-  .file-row.selected {
+  .tree-row.dir .pick {
+    background: color-mix(in oklab, var(--accent) 6%, transparent) !important;
+  }
+  .tree-row.file .pick {
+    background: color-mix(in oklab, var(--bg-elevated) 55%, transparent) !important;
+  }
+  .tree-row.file .label {
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    font-weight: 500;
+  }
+  .tree-row.dir .label {
+    font-weight: 700;
+  }
+  .tree-row.selected .pick {
     border-color: var(--accent) !important;
+    background: color-mix(in oklab, var(--accent) 16%, transparent) !important;
   }
-  .file-row.mapped {
+  .tree-row.mapped .pick {
     opacity: 0.55;
   }
-  .file-kind {
-    font-size: 0.7rem;
-    font-weight: 700;
-    color: var(--muted);
+  .icon {
+    flex: 0 0 auto;
+    width: 1.05rem;
+    height: 0.9rem;
+    border-radius: 2px;
+    position: relative;
   }
-  .file-name {
-    font-size: 0.88rem;
-    word-break: break-all;
+  .icon.folder {
+    background: color-mix(in oklab, var(--accent) 55%, #c9a227);
+    border-radius: 2px 2px 3px 3px;
+    box-shadow: inset 0 0.22rem 0 0 color-mix(in oklab, var(--accent) 35%, white);
+  }
+  .icon.audio {
+    width: 0.85rem;
+    height: 0.85rem;
+    border-radius: 50%;
+    border: 2px solid var(--muted);
+    background: transparent;
+  }
+  .icon.audio::after {
+    content: '';
+    position: absolute;
+    left: 0.28rem;
+    top: 0.12rem;
+    width: 0.18rem;
+    height: 0.45rem;
+    border-radius: 1px;
+    background: var(--muted);
+  }
+  .label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .meta {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .mapped-meta {
+    color: var(--accent);
+  }
+  .mapped-pill {
+    flex: 0 0 auto;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+    border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--border));
+    border-radius: 999px;
+    padding: 0.1rem 0.4rem;
+  }
+  .mapped-list {
+    display: grid;
+    gap: 0.55rem;
   }
   .mapped-row {
     display: flex;
     justify-content: space-between;
     gap: 0.75rem;
     align-items: start;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.65rem 0.75rem;
+    background: var(--bg);
+  }
+  .mapped-row.failed {
+    border-color: color-mix(in oklab, var(--danger) 45%, var(--border));
+  }
+  .path-line {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    word-break: break-all;
+    margin: 0.2rem 0 0.35rem;
+  }
+  .err {
+    color: var(--danger);
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+  }
+  .match-fields {
+    gap: 0.65rem;
   }
   .match-grid.compact {
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -347,7 +696,15 @@
     font-family: var(--mono);
     font-size: 0.85em;
   }
+  .tiny {
+    font-size: 0.8rem;
+  }
   @media (max-width: 900px) {
-    .map-layout { grid-template-columns: 1fr; }
+    .map-layout {
+      grid-template-columns: 1fr;
+    }
+    .tree {
+      max-height: 22rem;
+    }
   }
 </style>

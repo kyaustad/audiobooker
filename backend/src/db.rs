@@ -1,6 +1,10 @@
 use std::path::Path;
+use std::time::Duration;
 
-use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
+use sqlx::{
+    Row, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteSynchronous},
+};
 use std::str::FromStr;
 
 use crate::error::{AppError, AppResult};
@@ -12,6 +16,15 @@ pub async fn connect(database_path: &Path) -> AppResult<SqlitePool> {
             .map_err(|e| AppError::internal(format!("Failed to create data dir: {e}")))?;
     }
 
+    // SQLite allows many concurrent readers (WAL) but only ONE writer at a time.
+    // A multi-connection pool makes writers fight over the DB lock (SQLITE_BUSY /
+    // multi-second "slow statement" waits) when the API + background worker overlap.
+    //
+    // max_connections(1) turns the pool into an application-level queue: handlers and
+    // the worker wait for the connection instead of contending inside SQLite. That is
+    // the right model for a handful of users (≈4–5) on Unraid/Docker.
+    //
+    // busy_timeout remains as a safety net if anything else opens the same file.
     let options = SqliteConnectOptions::from_str(&format!(
         "sqlite://{}",
         database_path.display()
@@ -19,9 +32,25 @@ pub async fn connect(database_path: &Path) -> AppResult<SqlitePool> {
     .map_err(AppError::internal)?
     .create_if_missing(true)
     .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+    .synchronous(SqliteSynchronous::Normal)
+    .busy_timeout(Duration::from_secs(10))
     .foreign_keys(true);
 
-    let pool = SqlitePool::connect_with(options)
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(30))
+        .idle_timeout(None)
+        .connect_with(options)
+        .await
+        .map_err(AppError::internal)?;
+
+    // Extra PRAGMAs on the live connection set.
+    sqlx::query("PRAGMA temp_store = MEMORY;")
+        .execute(&pool)
+        .await
+        .map_err(AppError::internal)?;
+    sqlx::query("PRAGMA wal_autocheckpoint = 1000;")
+        .execute(&pool)
         .await
         .map_err(AppError::internal)?;
 
@@ -122,8 +151,6 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     )
     .await?;
     ensure_column(pool, "settings", "abs_user_last_sync_at", "TEXT").await?;
-    // In case 003 was applied before Abs path column existed on old DBs that
-    // skipped the migration file name, ensure column still lands.
     ensure_column(pool, "libraries", "abs_path", "TEXT").await?;
     seed_default_library(pool).await?;
     Ok(())
@@ -185,7 +212,6 @@ async fn seed_default_library(pool: &SqlitePool) -> AppResult<()> {
     if count.0 > 0 {
         return Ok(());
     }
-    // Placeholder until an admin mounts a share and assigns a container path.
     sqlx::query("INSERT INTO libraries (name, path) VALUES (?, ?)")
         .bind("Default")
         .bind("__unset__/default")

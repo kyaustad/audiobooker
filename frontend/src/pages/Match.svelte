@@ -21,14 +21,18 @@
   let libraryId = $state<number | null>(null)
   let downloadKind = $state('single')
 
+  function stripExtension(name: string) {
+    return name.replace(/\.(m4b|m4a|mp3|flac|ogg|opus|aac|wma|wav|mp4|mka|pdf|epub)$/i, '')
+  }
+
   function parseName(name: string | null | undefined) {
     if (!name) return { title: '', author: '' }
-    const cleaned = name.trim()
+    const cleaned = stripExtension(name.trim())
     const idx = cleaned.lastIndexOf(' - ')
     if (idx > 0) {
       return {
-        title: cleaned.slice(0, idx).trim(),
-        author: cleaned.slice(idx + 3).trim(),
+        title: stripExtension(cleaned.slice(0, idx).trim()),
+        author: stripExtension(cleaned.slice(idx + 3).trim()),
       }
     }
     return { title: cleaned, author: '' }
@@ -202,15 +206,13 @@
       <p class="muted">Library: <strong>{libraries[0].name}</strong> <span class="muted">({libraries[0].path})</span></p>
     {/if}
 
-    <form class="stack" onsubmit={search}>
-      <div class="row">
-        <label>Title
-          <input bind:value={title} placeholder="Book title" />
-        </label>
-        <label>Author
-          <input bind:value={author} placeholder="Optional" />
-        </label>
-      </div>
+    <form class="stack match-fields" onsubmit={search}>
+      <label>Title
+        <input bind:value={title} placeholder="Book title" />
+      </label>
+      <label>Author
+        <input bind:value={author} placeholder="Optional" />
+      </label>
       <label>Or ASIN
         <input bind:value={asin} placeholder="B0XXXXXXXX" />
       </label>
@@ -277,5 +279,8 @@
     margin-top: 0.35rem;
     font-weight: 600;
     cursor: pointer;
+  }
+  .match-fields {
+    gap: 0.7rem;
   }
 </style>

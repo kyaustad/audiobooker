@@ -60,64 +60,212 @@ pub fn build_library_relative_path(template: &str, meta: &BookMetadataPublic) ->
 /// qBit often reports host paths (e.g. `/mnt/user/downloads/Book`) while Audiobooker
 /// mounts the same share at `local_download_root` (e.g. `/downloads`). Prefer the path
 /// as-is when it exists; otherwise remap by joining the trailing relative segment onto
-/// the configured download root.
+/// the configured download root. Also tries incomplete→complete sibling folders.
 pub fn resolve_download_source(
     content_path: Option<&str>,
     save_path: Option<&str>,
     local_download_root: &str,
 ) -> PathBuf {
-    // Prefer the exact content path when it exists inside this container.
-    if let Some(content) = content_path.filter(|s| !s.is_empty()) {
-        let p = Path::new(content);
+    for candidate in content_path_candidates(content_path) {
+        let p = Path::new(&candidate);
         if p.exists() {
             return p.to_path_buf();
         }
     }
 
-    let local_root = local_download_root.trim();
-    let local = if local_root.is_empty() {
-        None
-    } else {
-        Some(Path::new(local_root))
-    };
+    let local_roots = local_root_candidates(local_download_root);
 
-    // Remap: strip qBit save_path prefix and join onto the configured download root.
-    if let (Some(content), Some(save), Some(local)) = (
+    // Remap: strip qBit save_path prefix and join onto each local root candidate.
+    if let (Some(content), Some(save)) = (
         content_path.filter(|s| !s.is_empty()),
         save_path.filter(|s| !s.is_empty()),
-        local,
     ) {
-        if let Ok(rel) = Path::new(content).strip_prefix(save) {
-            return local.join(rel);
+        for content_alt in content_path_candidates(Some(content)) {
+            for save_alt in content_path_candidates(Some(save)) {
+                if let Ok(rel) = Path::new(&content_alt).strip_prefix(&save_alt) {
+                    for local in &local_roots {
+                        let mapped = local.join(rel);
+                        if mapped.exists() {
+                            return mapped;
+                        }
+                    }
+                    // Prefer first local root even if missing (caller may join further).
+                    if let Some(local) = local_roots.first() {
+                        return local.join(rel);
+                    }
+                }
+            }
         }
     }
 
-    // Fall back: last path component under the local download root.
-    if let (Some(content), Some(local)) = (content_path.filter(|s| !s.is_empty()), local) {
-        if let Some(name) = Path::new(content).file_name() {
-            return local.join(name);
-        }
-        return PathBuf::from(content);
-    }
-
+    // Fall back: last path component under each local download root.
     if let Some(content) = content_path.filter(|s| !s.is_empty()) {
+        if let Some(name) = Path::new(content).file_name() {
+            for local in &local_roots {
+                let mapped = local.join(name);
+                if mapped.exists() {
+                    return mapped;
+                }
+            }
+            if let Some(local) = local_roots.first() {
+                return local.join(name);
+            }
+        }
         return PathBuf::from(content);
     }
 
     if let Some(save) = save_path.filter(|s| !s.is_empty()) {
-        let p = Path::new(save);
-        if p.exists() {
-            return p.to_path_buf();
+        for alt in content_path_candidates(Some(save)) {
+            let p = Path::new(&alt);
+            if p.exists() {
+                return p.to_path_buf();
+            }
         }
-        if let Some(local) = local {
-            return local.to_path_buf();
+        if let Some(local) = local_roots.first() {
+            return local.clone();
         }
         return PathBuf::from(save);
     }
 
-    local
-        .map(|p| p.to_path_buf())
+    local_roots
+        .into_iter()
+        .next()
         .unwrap_or_default()
+}
+
+/// Resolve a pack item's on-disk path, trying incomplete→complete and avoiding
+/// doubled torrent-root folders when joining relative qBit file names.
+pub fn resolve_item_source(
+    content_path: Option<&str>,
+    save_path: Option<&str>,
+    local_download_root: &str,
+    relative: &str,
+) -> PathBuf {
+    let rel = relative.trim_start_matches('/').replace('\\', "/");
+    let mut tried = Vec::new();
+
+    let push_try = |path: PathBuf, tried: &mut Vec<PathBuf>| {
+        if !tried.iter().any(|p| p == &path) {
+            tried.push(path);
+        }
+    };
+
+    let root = resolve_download_source(content_path, save_path, local_download_root);
+    for joined in join_source_variants(&root, &rel) {
+        push_try(joined, &mut tried);
+    }
+
+    for content_alt in content_path_candidates(content_path) {
+        let root_alt = PathBuf::from(&content_alt);
+        for joined in join_source_variants(&root_alt, &rel) {
+            push_try(joined, &mut tried);
+        }
+    }
+
+    for local in local_root_candidates(local_download_root) {
+        for joined in join_source_variants(&local, &rel) {
+            push_try(joined, &mut tried);
+        }
+        // Bare relative under local root (common when save_path changed category).
+        push_try(local.join(&rel), &mut tried);
+        if let Some(name) = Path::new(&rel).file_name() {
+            push_try(local.join(name), &mut tried);
+        }
+    }
+
+    for path in &tried {
+        if path.exists() {
+            return path.clone();
+        }
+    }
+
+    tried.into_iter().next().unwrap_or_else(|| PathBuf::from(&rel))
+}
+
+fn content_path_candidates(path: Option<&str>) -> Vec<String> {
+    let Some(path) = path.filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let mut out = vec![path.to_string()];
+    let replacements = [
+        ("/incomplete/", "/complete/"),
+        ("/Incomplete/", "/Complete/"),
+        ("/incomplete/", "/completed/"),
+        ("\\incomplete\\", "\\complete\\"),
+    ];
+    for (from, to) in replacements {
+        if path.contains(from) {
+            out.push(path.replace(from, to));
+        }
+    }
+    // Trailing folder name swap: .../incomplete → .../complete
+    let p = Path::new(path);
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name().and_then(|s| s.to_str())) {
+        let lower = name.to_ascii_lowercase();
+        if lower == "incomplete" {
+            out.push(parent.join("complete").to_string_lossy().into());
+            out.push(parent.join("completed").to_string_lossy().into());
+        }
+    }
+    out
+}
+
+fn local_root_candidates(local_download_root: &str) -> Vec<PathBuf> {
+    let local_root = local_download_root.trim();
+    if local_root.is_empty() {
+        return Vec::new();
+    }
+    let primary = PathBuf::from(local_root);
+    let mut roots = vec![primary.clone()];
+    if let (Some(parent), Some(name)) = (
+        primary.parent(),
+        primary.file_name().and_then(|s| s.to_str()),
+    ) {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("incomplete") {
+            // Prefer complete siblings first so finished torrents resolve correctly.
+            let mut preferred = Vec::new();
+            for alt in ["complete", "completed", "done"] {
+                let candidate = parent.join(alt);
+                if !roots.contains(&candidate) {
+                    preferred.push(candidate);
+                }
+            }
+            preferred.append(&mut roots);
+            return preferred;
+        } else if lower == "complete" || lower == "completed" {
+            let candidate = parent.join("incomplete");
+            if !roots.contains(&candidate) {
+                roots.push(candidate);
+            }
+        }
+    }
+    roots
+}
+
+fn join_source_variants(root: &Path, relative: &str) -> Vec<PathBuf> {
+    let rel = relative.trim_start_matches('/').replace('\\', "/");
+    if rel.is_empty() {
+        return vec![root.to_path_buf()];
+    }
+
+    let mut out = vec![root.join(&rel)];
+
+    // Avoid doubling torrent root: content_path often ends with the same folder
+    // that prefixes qBit file names (e.g. root=/…/Pack, rel=Pack/Book1/…).
+    let root_name = root.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if let Some(first) = rel.split('/').next() {
+        if !root_name.is_empty() && root_name == first {
+            let stripped = rel[first.len()..].trim_start_matches('/');
+            if stripped.is_empty() {
+                out.push(root.to_path_buf());
+            } else {
+                out.push(root.join(stripped));
+            }
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -132,6 +280,23 @@ mod tests {
             "/downloads",
         );
         assert_eq!(mapped, PathBuf::from("/downloads/Some Book"));
+    }
+
+    #[test]
+    fn strips_doubled_torrent_root() {
+        let variants = join_source_variants(
+            Path::new("/downloads/My Pack"),
+            "My Pack/Book One/chapter.m4b",
+        );
+        assert!(variants.contains(&PathBuf::from(
+            "/downloads/My Pack/Book One/chapter.m4b"
+        )));
+    }
+
+    #[test]
+    fn incomplete_to_complete_candidate() {
+        let alts = content_path_candidates(Some("/data/incomplete/My Pack"));
+        assert!(alts.iter().any(|p| p.contains("/complete/")));
     }
 }
 
@@ -149,10 +314,12 @@ pub async fn copy_completed(
 
     let destination = library_root.join(relative);
     if destination.exists() {
-        return Err(AppError::Conflict(format!(
-            "Destination already exists: {}",
-            destination.display()
-        )));
+        // Retry-friendly: treat an existing destination as success (already imported).
+        tracing::info!(
+            dest = %destination.display(),
+            "destination already exists — treating import as complete"
+        );
+        return Ok(destination);
     }
 
     if let Some(parent) = destination.parent() {

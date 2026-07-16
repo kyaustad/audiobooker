@@ -1,10 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::Utc;
 use sqlx::SqlitePool;
 
-use crate::files::{build_library_relative_path, copy_completed, resolve_download_source};
+use crate::files::{
+    build_library_relative_path, copy_completed, resolve_download_source, resolve_item_source,
+};
 use crate::models::{
     BookMetadata, BookMetadataPublic, Download, DownloadItem, Library, NotifyKind, Settings,
     USER_COLUMNS, User,
@@ -50,6 +52,14 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         r#"
         SELECT * FROM downloads
         WHERE status IN ('queued', 'downloading', 'completed', 'copying', 'awaiting_map', 'partial')
+           OR (
+             kind = 'pack'
+             AND status = 'imported'
+             AND EXISTS (
+               SELECT 1 FROM download_items
+               WHERE download_id = downloads.id AND status IN ('ready', 'pending', 'error')
+             )
+           )
         "#,
     )
     .fetch_all(pool)
@@ -107,7 +117,12 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
             continue;
         };
 
-        if download.status == "copying" || download.status == "imported" {
+        if download.status == "copying" {
+            continue;
+        }
+        // Fully-imported packs with no pending items are skipped by the SQL filter;
+        // imported packs that still have ready/error items continue below.
+        if download.status == "imported" && download.kind != "pack" {
             continue;
         }
 
@@ -134,6 +149,10 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         } else {
             download.completed_at.clone()
         };
+
+        let old_content = download.content_path.clone().unwrap_or_default();
+        let paths_moved_off_incomplete = old_content.to_ascii_lowercase().contains("incomplete")
+            && !torrent.content_path.to_ascii_lowercase().contains("incomplete");
 
         sqlx::query(
             r#"
@@ -176,6 +195,32 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
                 "UPDATE download_items SET status = 'ready', updated_at = datetime('now') WHERE download_id = ? AND status = 'pending'",
             )
             .bind(download.id)
+            .execute(pool)
+            .await?;
+        }
+
+        // Existing installs: when qBit moves incomplete → complete, requeue failed imports.
+        if download.kind == "pack"
+            && (paths_moved_off_incomplete || (torrent_completed && newly_completed))
+        {
+            sqlx::query(
+                r#"
+                UPDATE download_items SET
+                    status = 'ready',
+                    error_message = NULL,
+                    updated_at = datetime('now')
+                WHERE download_id = ?
+                  AND status = 'error'
+                  AND (
+                    error_message LIKE '%incomplete%'
+                    OR error_message LIKE '%Source not found%'
+                    OR error_message LIKE '%does not exist%'
+                    OR ? = 1
+                  )
+                "#,
+            )
+            .bind(download.id)
+            .bind(if paths_moved_off_incomplete { 1 } else { 0 })
             .execute(pool)
             .await?;
         }
@@ -440,12 +485,6 @@ async fn import_pack(
         return Ok(());
     }
 
-    let content_root = resolve_download_source(
-        download.content_path.as_deref(),
-        download.save_path.as_deref(),
-        &settings.download_path,
-    );
-
     for item in ready {
         if item.status == "imported" || item.status == "copying" {
             continue;
@@ -481,7 +520,25 @@ async fn import_pack(
             continue;
         };
 
-        let source = join_source(&content_root, &item.source_path);
+        let source = resolve_item_source(
+            download.content_path.as_deref(),
+            download.save_path.as_deref(),
+            &settings.download_path,
+            &item.source_path,
+        );
+        if !source.exists() {
+            sqlx::query(
+                "UPDATE download_items SET status = 'error', error_message = ?, updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(format!(
+                "Source not found (torrent may still be in incomplete, or path moved): {}",
+                source.display()
+            ))
+            .bind(item.id)
+            .execute(pool)
+            .await?;
+            continue;
+        }
         match copy_completed(&source, Path::new(&library_root), &relative).await {
             Ok(dest) => {
                 sqlx::query(
@@ -571,15 +628,6 @@ async fn import_pack(
     .await?;
 
     Ok(())
-}
-
-fn join_source(root: &Path, relative: &str) -> PathBuf {
-    let rel = relative.trim_start_matches('/').replace('\\', "/");
-    if rel.is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(rel)
-    }
 }
 
 async fn library_root_for(
