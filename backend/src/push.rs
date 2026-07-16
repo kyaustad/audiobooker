@@ -169,21 +169,26 @@ pub async fn notify_user(
         };
 
         if let Err(err) = WebPushClient::send(&client, message).await {
-            tracing::warn!(error = %err, "web push failed");
-            let msg = err.to_string().to_ascii_lowercase();
-            let stale = msg.contains("410")
-                || msg.contains("404")
-                || msg.contains("no longer valid")
-                || msg.contains("gone")
-                || msg.contains("unsubscribed")
-                || msg.contains("expired")
-                || msg.contains("not found");
+            let msg = err.to_string();
+            let lower = msg.to_ascii_lowercase();
+            // EndpointNotValid / EndpointNotFound / Other("…") from dead browser subscriptions.
+            let stale = lower.contains("no longer valid")
+                || lower.contains("should not be used")
+                || lower.contains("410")
+                || lower.contains("404")
+                || lower.contains("gone")
+                || lower.contains("unsubscribed")
+                || lower.contains("expired")
+                || lower.contains("not found")
+                || lower.contains("unknown error when connecting");
             if stale {
                 let _ = sqlx::query("DELETE FROM push_subscriptions WHERE endpoint = ?")
                     .bind(&endpoint)
                     .execute(pool)
                     .await;
-                tracing::info!(%endpoint, "pruned stale push subscription");
+                tracing::info!(%endpoint, error = %msg, "pruned stale push subscription");
+            } else {
+                tracing::warn!(error = %msg, "web push failed");
             }
         }
     }

@@ -14,7 +14,11 @@ use axum::{
     Router,
     routing::{delete, get, post, put},
 };
-use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+use tower_http::{
+    compression::CompressionLayer,
+    trace::{DefaultMakeSpan, DefaultOnFailure, TraceLayer},
+};
+use tracing::Level;
 
 use crate::state::AppState;
 
@@ -83,7 +87,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api", api)
         .fallback(spa::fallback)
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
         .layer(CompressionLayer::new())
         .with_state(state)
 }

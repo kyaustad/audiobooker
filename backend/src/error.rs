@@ -58,6 +58,11 @@ impl IntoResponse for AppError {
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status.is_server_error() {
+            tracing::error!(error = %self, status = %status.as_u16(), "request failed");
+        } else if status == StatusCode::BAD_REQUEST || status == StatusCode::CONFLICT {
+            tracing::warn!(error = %self, status = %status.as_u16(), "client error");
+        }
         (status, Json(json!({ "error": self.to_string() }))).into_response()
     }
 }

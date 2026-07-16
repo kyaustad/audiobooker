@@ -57,6 +57,38 @@
     return (d.kind || 'single') === 'pack'
   }
 
+  /** Refresh qBit is for packs (path moves / remapping), not finished singles. */
+  function showRefreshQbit(d: Download) {
+    if (!isPack(d)) return false
+    if (d.status === 'awaiting_match') return false
+    // Fully imported packs with nothing left to map still don't need it on the overview.
+    if (d.status === 'imported') {
+      const items = d.items || []
+      return items.some((i) => i.status === 'error' || i.status === 'ready' || i.status === 'pending')
+    }
+    return true
+  }
+
+  function showMap(d: Download) {
+    return isPack(d) && d.status !== 'awaiting_match'
+  }
+
+  function hasActions(d: Download) {
+    return (
+      d.status === 'awaiting_match' ||
+      showMap(d) ||
+      showRefreshQbit(d) ||
+      canRemove(d)
+    )
+  }
+
+  function shortPath(path: string | null | undefined) {
+    if (!path) return ''
+    const parts = path.split('/').filter(Boolean)
+    if (parts.length <= 3) return path
+    return `…/${parts.slice(-3).join('/')}`
+  }
+
   function packProgress(d: Download) {
     const items = d.items || []
     if (!items.length) return null
@@ -362,7 +394,7 @@
   {:else}
     <div class="download-grid">
       {#each visible as d}
-        <article class="download-item">
+        <article class="download-item" class:done={d.status === 'imported' && !isPack(d)}>
           <img class="cover" src={d.metadata?.cover_url || '/favicon.svg'} alt="" />
           <div class="meta">
             <strong class="title">{d.metadata?.title || d.name || 'Untitled'}</strong>
@@ -374,50 +406,56 @@
               {#if isPack(d)}
                 <span class="badge pack">pack</span>
               {/if}
+              {#if d.status === 'imported' && !isPack(d)}
+                <span class="badge seeding-pill">seeding</span>
+              {/if}
             </div>
-            <div class="progress"><span style={`width:${Math.round(d.progress * 100)}%`}></span></div>
-            <div class="muted stats">
-              {Math.round(d.progress * 100)}% · {formatBytes(d.download_speed)}
-            </div>
+            {#if d.status !== 'imported'}
+              <div class="progress"><span style={`width:${Math.round(d.progress * 100)}%`}></span></div>
+              <div class="muted stats">
+                {Math.round(d.progress * 100)}%
+                {#if d.download_speed > 0}
+                  · {formatBytes(d.download_speed)}
+                {/if}
+              </div>
+            {/if}
             {#if packProgress(d)}
-              <div class="muted">{packProgress(d)}</div>
+              <div class="muted pack-note">{packProgress(d)}</div>
             {/if}
-            {#if d.destination_path}
-              <div class="muted dest">Imported to {d.destination_path}</div>
-            {/if}
-            {#if SEEDING_STATUSES.has(d.status)}
-              <div class="muted seeding-note">Seeding in qBittorrent — left locked until ratio rules drop it.</div>
+            {#if d.destination_path && d.status === 'imported'}
+              <div class="muted dest" title={d.destination_path}>{shortPath(d.destination_path)}</div>
             {/if}
             {#if d.error_message}
               <div class="err">{d.error_message}</div>
             {/if}
           </div>
-          <div class="actions">
-            {#if d.status === 'awaiting_match'}
-              <a class="btn" href={`#/match/${d.id}`}>Match</a>
-            {:else if isPack(d) && d.status !== 'awaiting_match'}
-              <a class="btn" href={`#/map/${d.id}`}>
-                {d.status === 'imported' || d.status === 'partial' ? 'Map more' : 'Map'}
-              </a>
-            {/if}
-            {#if d.status !== 'awaiting_match'}
-              <button
-                class="secondary"
-                type="button"
-                disabled={refreshingId === d.id}
-                onclick={() => refreshQbit(d)}
-              >
-                {refreshingId === d.id ? '…' : 'Refresh qBit'}
-              </button>
-            {/if}
-            {#if canRemove(d)}
-              <button class="danger" type="button" disabled={removingId === d.id} onclick={() => remove(d)}>
-                {removingId === d.id ? '…' : 'Remove'}
-              </button>
-            {:else}
-              <span class="muted tiny">Seeding</span>
-            {/if}
-          </div>
+          {#if hasActions(d)}
+            <div class="actions">
+              {#if d.status === 'awaiting_match'}
+                <a class="btn" href={`#/match/${d.id}`}>Match</a>
+              {/if}
+              {#if showMap(d)}
+                <a class="btn" href={`#/map/${d.id}`}>
+                  {d.status === 'imported' || d.status === 'partial' ? 'Map more' : 'Map'}
+                </a>
+              {/if}
+              {#if showRefreshQbit(d)}
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={refreshingId === d.id}
+                  onclick={() => refreshQbit(d)}
+                >
+                  {refreshingId === d.id ? '…' : 'Refresh qBit'}
+                </button>
+              {/if}
+              {#if canRemove(d)}
+                <button class="danger" type="button" disabled={removingId === d.id} onclick={() => remove(d)}>
+                  {removingId === d.id ? '…' : 'Remove'}
+                </button>
+              {/if}
+            </div>
+          {/if}
         </article>
       {/each}
     </div>
@@ -562,13 +600,20 @@
     margin-top: 0.35rem;
   }
   .dest {
-    margin-top: 0.25rem;
-    word-break: break-all;
-    font-size: 0.8rem;
-  }
-  .seeding-note {
     margin-top: 0.35rem;
+    font-size: 0.78rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pack-note {
+    margin-top: 0.25rem;
     font-size: 0.82rem;
+  }
+  .seeding-pill {
+    background: color-mix(in oklab, var(--muted) 18%, transparent);
+    color: var(--muted);
+    border-color: var(--border);
   }
   .err {
     color: var(--danger);
@@ -582,10 +627,16 @@
     align-items: stretch;
     min-width: 5.5rem;
   }
+  .actions:empty {
+    display: none;
+  }
   .actions .btn,
   .actions button {
     text-align: center;
     justify-content: center;
+  }
+  .download-item.done {
+    opacity: 0.92;
   }
   .tiny {
     font-size: 0.78rem;
@@ -598,15 +649,20 @@
       display: none;
     }
     .download-item {
-      grid-template-columns: 64px 1fr;
+      grid-template-columns: 56px 1fr;
       grid-template-areas:
         'cover meta'
         'actions actions';
+      gap: 0.55rem 0.7rem;
+      padding: 0.75rem;
+    }
+    .download-item.done {
+      grid-template-areas: 'cover meta';
     }
     .cover {
       grid-area: cover;
-      width: 64px;
-      height: 64px;
+      width: 56px;
+      height: 56px;
     }
     .meta {
       grid-area: meta;
@@ -617,13 +673,25 @@
       flex-direction: row;
       flex-wrap: wrap;
       min-width: 0;
+      padding-top: 0.15rem;
+      border-top: 1px solid var(--border);
     }
     .actions .btn,
     .actions button {
-      flex: 1 1 auto;
+      flex: 1 1 calc(50% - 0.25rem);
       min-width: 0;
-      padding: 0.45rem 0.65rem;
-      font-size: 0.9rem;
+      padding: 0.5rem 0.65rem;
+      font-size: 0.88rem;
+    }
+    .stats {
+      font-size: 0.8rem;
+    }
+    .dest {
+      white-space: normal;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      -webkit-box-orient: vertical;
     }
     .push-actions {
       width: 100%;
