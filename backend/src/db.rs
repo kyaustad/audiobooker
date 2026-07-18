@@ -202,15 +202,34 @@ async fn run_once(pool: &SqlitePool, version: &str, sql: &str) -> AppResult<()> 
     if exists.is_some() {
         return Ok(());
     }
-    sqlx::raw_sql(sql)
-        .execute(pool)
-        .await
-        .map_err(AppError::internal)?;
+    // Execute statements individually so a multi-statement migration cannot be
+    // marked applied after only the first ALTER/CREATE succeeds.
+    for stmt in sql.split(';') {
+        let stmt = stmt.trim();
+        if stmt.is_empty() || stmt.starts_with("--") {
+            continue;
+        }
+        // Skip pure comment blocks (lines that are only comments).
+        let without_comments: String = stmt
+            .lines()
+            .filter(|l| !l.trim().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let without_comments = without_comments.trim();
+        if without_comments.is_empty() {
+            continue;
+        }
+        sqlx::raw_sql(without_comments)
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::internal(format!("migration {version} failed: {e}")))?;
+    }
     sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
         .bind(version)
         .execute(pool)
         .await
         .map_err(AppError::internal)?;
+    tracing::info!(version, "applied database migration");
     Ok(())
 }
 
@@ -226,6 +245,7 @@ async fn ensure_column(
         .map_err(AppError::internal)?;
     let has = infos.iter().any(|row| {
         row.try_get::<String, _>("name")
+            .or_else(|_| row.try_get::<String, _>(1))
             .map(|name| name == column)
             .unwrap_or(false)
     });
@@ -235,7 +255,10 @@ async fn ensure_column(
         ))
         .execute(pool)
         .await
-        .map_err(AppError::internal)?;
+        .map_err(|e| {
+            AppError::internal(format!("failed to add column {table}.{column}: {e}"))
+        })?;
+        tracing::info!(table, column, "added missing database column");
     }
     Ok(())
 }

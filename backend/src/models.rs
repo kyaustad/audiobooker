@@ -53,6 +53,15 @@ pub const USER_COLUMNS: &str = "id, username, password_hash, role, must_change_p
     abs_user_id, rate_limit_requests, rate_limit_window_secs, rate_limit_active_torrents, \
     created_at, updated_at";
 
+/// Same as `USER_COLUMNS` with a table/alias prefix (e.g. `"u"` → `u.id, u.username, …`).
+pub fn user_columns_prefixed(prefix: &str) -> String {
+    USER_COLUMNS
+        .split(',')
+        .map(|c| format!("{prefix}.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationPrefs {
     pub notify_imported: bool,

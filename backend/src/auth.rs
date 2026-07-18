@@ -65,16 +65,15 @@ pub async fn destroy_session(pool: &SqlitePool, session_id: &str) -> AppResult<(
 
 pub async fn user_from_session(pool: &SqlitePool, session_id: &str) -> AppResult<Option<User>> {
     let now = Utc::now().to_rfc3339();
-    let user = sqlx::query_as::<_, User>(
+    let cols = crate::models::user_columns_prefixed("u");
+    let user = sqlx::query_as::<_, User>(&format!(
         r#"
-        SELECT u.id, u.username, u.password_hash, u.role, u.must_change_password,
-               u.notify_imported, u.notify_download_finished, u.notify_pack_ready, u.notify_failures,
-               u.abs_user_id, u.created_at, u.updated_at
+        SELECT {cols}
         FROM sessions s
         JOIN users u ON u.id = s.user_id
         WHERE s.id = ? AND s.expires_at > ?
-        "#,
-    )
+        "#
+    ))
     .bind(session_id)
     .bind(now)
     .fetch_optional(pool)
