@@ -95,6 +95,18 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/006_abs_user_sync.sql"),
     )
     .await?;
+    run_once(
+        pool,
+        "007_item_sources",
+        include_str!("../migrations/007_item_sources.sql"),
+    )
+    .await?;
+    run_once(
+        pool,
+        "008_rate_limits",
+        include_str!("../migrations/008_rate_limits.sql"),
+    )
+    .await?;
     ensure_column(pool, "downloads", "library_id", "INTEGER REFERENCES libraries(id)").await?;
     ensure_column(pool, "downloads", "kind", "TEXT NOT NULL DEFAULT 'single'").await?;
     ensure_column(pool, "users", "notify_imported", "INTEGER NOT NULL DEFAULT 1").await?;
@@ -108,6 +120,9 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     ensure_column(pool, "users", "notify_pack_ready", "INTEGER NOT NULL DEFAULT 1").await?;
     ensure_column(pool, "users", "notify_failures", "INTEGER NOT NULL DEFAULT 1").await?;
     ensure_column(pool, "users", "abs_user_id", "TEXT").await?;
+    ensure_column(pool, "users", "rate_limit_requests", "INTEGER").await?;
+    ensure_column(pool, "users", "rate_limit_window_secs", "INTEGER").await?;
+    ensure_column(pool, "users", "rate_limit_active_torrents", "INTEGER").await?;
     ensure_column(
         pool,
         "settings",
@@ -151,6 +166,27 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     )
     .await?;
     ensure_column(pool, "settings", "abs_user_last_sync_at", "TEXT").await?;
+    ensure_column(
+        pool,
+        "settings",
+        "rate_limit_requests",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "settings",
+        "rate_limit_window_secs",
+        "INTEGER NOT NULL DEFAULT 86400",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "settings",
+        "rate_limit_active_torrents",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
     ensure_column(pool, "libraries", "abs_path", "TEXT").await?;
     seed_default_library(pool).await?;
     Ok(())

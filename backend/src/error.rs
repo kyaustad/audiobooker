@@ -18,6 +18,8 @@ pub enum AppError {
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
+    TooManyRequests(String),
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -56,11 +58,15 @@ impl IntoResponse for AppError {
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status.is_server_error() {
             tracing::error!(error = %self, status = %status.as_u16(), "request failed");
-        } else if status == StatusCode::BAD_REQUEST || status == StatusCode::CONFLICT {
+        } else if matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS
+        ) {
             tracing::warn!(error = %self, status = %status.as_u16(), "client error");
         }
         (status, Json(json!({ "error": self.to_string() }))).into_response()

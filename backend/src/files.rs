@@ -305,48 +305,111 @@ pub async fn copy_completed(
     library_root: &Path,
     relative: &Path,
 ) -> AppResult<PathBuf> {
-    if !source.exists() {
-        return Err(AppError::Internal(format!(
-            "Source path does not exist: {} (check that /downloads matches qBittorrent's completed files and Settings → Download path)",
-            source.display()
-        )));
+    copy_sources_into_library(&[source.to_path_buf()], library_root, relative).await
+}
+
+/// Copy one or more torrent paths into the same library book folder.
+/// Existing destination directory is merged (additional files allowed).
+pub async fn copy_sources_into_library(
+    sources: &[PathBuf],
+    library_root: &Path,
+    relative: &Path,
+) -> AppResult<PathBuf> {
+    if sources.is_empty() {
+        return Err(AppError::Internal("No source paths to copy".into()));
+    }
+    for source in sources {
+        if !source.exists() {
+            return Err(AppError::Internal(format!(
+                "Source path does not exist: {} (check that /downloads matches qBittorrent's completed files and Settings → Download path)",
+                source.display()
+            )));
+        }
     }
 
     let destination = library_root.join(relative);
-    if destination.exists() {
-        // Retry-friendly: treat an existing destination as success (already imported).
-        tracing::info!(
-            dest = %destination.display(),
-            "destination already exists — treating import as complete"
-        );
-        return Ok(destination);
-    }
 
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
+    // Single directory source: recursive copy into book folder (merge if exists).
+    if sources.len() == 1 {
+        let source = &sources[0];
+        let meta = fs::metadata(source)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
+        if meta.is_dir() {
+            if destination.exists() {
+                merge_dir_recursive(source, &destination).await?;
+            } else {
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| AppError::internal(e.to_string()))?;
+                }
+                copy_dir_recursive(source, &destination).await?;
+            }
+            return Ok(destination);
+        }
     }
 
-    let meta = fs::metadata(source)
+    fs::create_dir_all(&destination)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
 
-    if meta.is_dir() {
-        copy_dir_recursive(source, &destination).await?;
-    } else {
-        fs::create_dir_all(&destination)
+    for source in sources {
+        let meta = fs::metadata(source)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
+        if meta.is_dir() {
+            merge_dir_recursive(source, &destination).await?;
+            continue;
+        }
         let file_name = source
             .file_name()
             .ok_or_else(|| AppError::Internal("Invalid source file".into()))?;
-        fs::copy(source, destination.join(file_name))
+        let dest_file = destination.join(file_name);
+        if dest_file.exists() {
+            tracing::info!(
+                dest = %dest_file.display(),
+                "file already exists in book folder — skipping"
+            );
+            continue;
+        }
+        fs::copy(source, &dest_file)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
     }
 
     Ok(destination)
+}
+
+async fn merge_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
+    fs::create_dir_all(dst)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let mut entries = fs::read_dir(src)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            Box::pin(merge_dir_recursive(&from, &to)).await?;
+        } else if to.exists() {
+            tracing::info!(dest = %to.display(), "file already exists — skipping");
+        } else {
+            fs::copy(&from, &to)
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

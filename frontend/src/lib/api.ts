@@ -6,6 +6,9 @@ export type User = {
   abs_user_id?: string | null
   libraries?: Library[]
   library_ids?: number[]
+  rate_limit_requests?: number | null
+  rate_limit_window_secs?: number | null
+  rate_limit_active_torrents?: number | null
 }
 
 export type NotificationPrefs = {
@@ -28,6 +31,7 @@ export type DownloadItem = {
   id: number
   download_id: number
   source_path: string
+  source_paths?: string[]
   library_id: number
   status: string
   destination_path?: string | null
@@ -124,7 +128,14 @@ export const api = {
     }),
   updateUser: (
     id: number,
-    body: { password?: string; library_ids?: number[]; must_change_password?: boolean },
+    body: {
+      password?: string
+      library_ids?: number[]
+      must_change_password?: boolean
+      rate_limit_requests?: number | null
+      rate_limit_window_secs?: number | null
+      rate_limit_active_torrents?: number | null
+    },
   ) => request(`/users/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteUser: (id: number) => request(`/users/${id}`, { method: 'DELETE' }),
   listLibraries: () => request<{ libraries: Library[] }>('/libraries'),
@@ -209,7 +220,12 @@ export const api = {
     }>(`/downloads/${id}/refresh-qbittorrent`, { method: 'POST' }),
   mapDownloadItem: (
     id: number,
-    body: { source_path: string; match_data: unknown; library_id?: number },
+    body: {
+      source_path?: string
+      source_paths?: string[]
+      match_data: unknown
+      library_id?: number
+    },
   ) =>
     request<{ download: Download }>(`/downloads/${id}/items`, {
       method: 'POST',

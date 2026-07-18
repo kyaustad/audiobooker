@@ -8,11 +8,12 @@ use serde_json::{Value, json};
 use crate::auth::AuthSession;
 use crate::error::{AppError, AppResult};
 use crate::files::{entries_from_disk, entries_from_qb_paths, resolve_download_source};
+use crate::limits::{check_active_torrent_limit, check_request_limit};
 use crate::magnet::parse_download_input;
 use crate::metadata::MetadataMatch;
 use crate::models::{
-    BookMetadata, Download, DownloadItem, DownloadItemWithMetadata, DownloadWithMetadata, Library,
-    Settings, User,
+    BookMetadata, Download, DownloadItem, DownloadItemSource, DownloadItemWithMetadata,
+    DownloadWithMetadata, Library, Settings, USER_COLUMNS, User,
 };
 use crate::qbittorrent::{QbTorrent, map_state};
 use crate::state::AppState;
@@ -32,9 +33,59 @@ pub struct MatchRequest {
 
 #[derive(Deserialize)]
 pub struct MapItemRequest {
-    pub source_path: String,
+    /// Legacy single path; prefer `source_paths`.
+    pub source_path: Option<String>,
+    pub source_paths: Option<Vec<String>>,
     pub match_data: MetadataMatch,
     pub library_id: Option<i64>,
+}
+
+fn normalize_source_path(raw: &str) -> AppResult<String> {
+    let source_path = raw.trim().trim_start_matches('/').replace('\\', "/");
+    if source_path.is_empty() || source_path.contains("..") {
+        return Err(AppError::BadRequest("Invalid source path".into()));
+    }
+    Ok(source_path)
+}
+
+fn collect_map_paths(body: &MapItemRequest) -> AppResult<Vec<String>> {
+    let mut paths = Vec::new();
+    if let Some(list) = &body.source_paths {
+        for p in list {
+            let n = normalize_source_path(p)?;
+            if !paths.contains(&n) {
+                paths.push(n);
+            }
+        }
+    }
+    if let Some(single) = &body.source_path {
+        let n = normalize_source_path(single)?;
+        if !paths.contains(&n) {
+            paths.push(n);
+        }
+    }
+    if paths.is_empty() {
+        return Err(AppError::BadRequest(
+            "Select at least one file or folder to map".into(),
+        ));
+    }
+    Ok(paths)
+}
+
+async fn source_paths_for_item(
+    pool: &sqlx::SqlitePool,
+    item: &DownloadItem,
+) -> AppResult<Vec<String>> {
+    let rows = sqlx::query_as::<_, DownloadItemSource>(
+        "SELECT * FROM download_item_sources WHERE download_item_id = ? ORDER BY source_path",
+    )
+    .bind(item.id)
+    .fetch_all(pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok(vec![item.source_path.clone()]);
+    }
+    Ok(rows.into_iter().map(|r| r.source_path).collect())
 }
 
 async fn attach_metadata(
@@ -57,6 +108,7 @@ async fn attach_metadata(
         .await?;
         let mut out = Vec::new();
         for item in rows {
+            let source_paths = source_paths_for_item(pool, &item).await?;
             let item_meta = sqlx::query_as::<_, BookMetadata>(
                 "SELECT * FROM book_metadata WHERE download_item_id = ?",
             )
@@ -65,6 +117,7 @@ async fn attach_metadata(
             .await?;
             out.push(DownloadItemWithMetadata {
                 item,
+                source_paths,
                 metadata: item_meta.map(Into::into),
             });
         }
@@ -176,9 +229,9 @@ pub async fn list_for_username(
     AxumPath(username): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
     auth.require_root()?;
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users WHERE username = ? COLLATE NOCASE",
-    )
+    let user = sqlx::query_as::<_, User>(&format!(
+        "SELECT {USER_COLUMNS} FROM users WHERE username = ? COLLATE NOCASE"
+    ))
     .bind(username)
     .fetch_optional(&state.pool)
     .await?
@@ -221,6 +274,8 @@ pub async fn create(
             "Root account is for administration only. Create a user account to add downloads.".into(),
         ));
     }
+
+    check_request_limit(&state.pool, auth.user.id).await?;
 
     let kind = match body.kind.as_deref().unwrap_or("single") {
         "pack" => "pack",
@@ -309,6 +364,8 @@ pub async fn start_pack(
             "Your account has no libraries assigned. Ask an admin to grant library access.".into(),
         ));
     }
+
+    check_active_torrent_limit(&state.pool, auth.user.id).await?;
 
     sqlx::query(
         "UPDATE downloads SET kind = 'pack', updated_at = datetime('now') WHERE id = ?",
@@ -706,14 +763,8 @@ pub async fn map_item(
         ));
     }
 
-    let source_path = body
-        .source_path
-        .trim()
-        .trim_start_matches('/')
-        .replace('\\', "/");
-    if source_path.is_empty() || source_path.contains("..") {
-        return Err(AppError::BadRequest("Invalid source path".into()));
-    }
+    let source_paths = collect_map_paths(&body)?;
+    let primary_path = source_paths[0].clone();
 
     let library_id = resolve_library_id(&state.pool, auth.user.id, body.library_id).await?;
     let m = body.match_data;
@@ -730,6 +781,34 @@ pub async fn map_item(
         "pending"
     };
 
+    // Reject if any path is already mapped on this download.
+    for path in &source_paths {
+        let taken: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM download_item_sources WHERE download_id = ? AND source_path = ?",
+        )
+        .bind(download.id)
+        .bind(path)
+        .fetch_optional(&state.pool)
+        .await?;
+        if taken.is_some() {
+            return Err(AppError::Conflict(format!(
+                "Path already mapped: {path}"
+            )));
+        }
+        let legacy: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM download_items WHERE download_id = ? AND source_path = ?",
+        )
+        .bind(download.id)
+        .bind(path)
+        .fetch_optional(&state.pool)
+        .await?;
+        if legacy.is_some() {
+            return Err(AppError::Conflict(format!(
+                "Path already mapped: {path}"
+            )));
+        }
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO download_items (download_id, source_path, library_id, status)
@@ -737,7 +816,7 @@ pub async fn map_item(
         "#,
     )
     .bind(download.id)
-    .bind(&source_path)
+    .bind(&primary_path)
     .bind(library_id)
     .bind(item_status)
     .execute(&state.pool)
@@ -750,6 +829,27 @@ pub async fn map_item(
         }
     })?;
     let item_id = result.last_insert_rowid();
+
+    for path in &source_paths {
+        sqlx::query(
+            r#"
+            INSERT INTO download_item_sources (download_id, download_item_id, source_path)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(download.id)
+        .bind(item_id)
+        .bind(path)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                AppError::Conflict(format!("Path already mapped: {path}"))
+            } else {
+                AppError::from(e)
+            }
+        })?;
+    }
 
     sqlx::query(
         r#"
@@ -908,6 +1008,8 @@ pub async fn match_metadata(
     let authors = serde_json::to_string(&m.authors).unwrap_or_else(|_| "[]".into());
     let narrators = serde_json::to_string(&m.narrators).unwrap_or_else(|_| "[]".into());
     let library_id = resolve_library_id(&state.pool, auth.user.id, body.library_id).await?;
+
+    check_active_torrent_limit(&state.pool, auth.user.id).await?;
 
     sqlx::query("DELETE FROM book_metadata WHERE download_id = ? AND download_item_id IS NULL")
         .bind(download.id)

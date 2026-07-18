@@ -43,7 +43,12 @@
   onMount(async () => {
     try {
       const data = await api.getSettings()
-      settings = data.settings
+      settings = {
+        rate_limit_requests: 0,
+        rate_limit_window_secs: 86400,
+        rate_limit_active_torrents: 0,
+        ...data.settings,
+      }
       await refreshLibraries()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to load settings')
@@ -284,6 +289,25 @@
     {#if settings.abs_user_last_sync_at}
       <p class="muted" style="margin:0">Last user sync: {settings.abs_user_last_sync_at}</p>
     {/if}
+
+    <div>
+      <h3 style="margin:0.5rem 0 0.25rem">Rate limits</h3>
+      <p class="muted" style="margin:0">
+        Global caps for download creates and concurrent torrents. Use 0 for unlimited. Per-user
+        overrides are on the Users page.
+      </p>
+    </div>
+    <div class="row">
+      <label>Max requests per window
+        <input type="number" min="0" bind:value={settings.rate_limit_requests} />
+      </label>
+      <label>Window (seconds)
+        <input type="number" min="60" bind:value={settings.rate_limit_window_secs} />
+      </label>
+      <label>Max active torrents
+        <input type="number" min="0" bind:value={settings.rate_limit_active_torrents} />
+      </label>
+    </div>
 
     <div class="row">
       <button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>

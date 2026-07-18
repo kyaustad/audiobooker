@@ -27,15 +27,7 @@
 
   function parseName(name: string | null | undefined) {
     if (!name) return { title: '', author: '' }
-    const cleaned = stripExtension(name.trim())
-    const idx = cleaned.lastIndexOf(' - ')
-    if (idx > 0) {
-      return {
-        title: stripExtension(cleaned.slice(0, idx).trim()),
-        author: stripExtension(cleaned.slice(idx + 3).trim()),
-      }
-    }
-    return { title: cleaned, author: '' }
+    return { title: stripExtension(name.trim()), author: '' }
   }
 
   onMount(async () => {

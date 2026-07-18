@@ -1,14 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
-  import { api, type Download, type NotificationPrefs } from '../lib/api'
-  import {
-    enableNotifications,
-    disableNotifications,
-    getPushStatus,
-    saveNotificationPrefs,
-    sendTestNotification,
-  } from '../lib/push'
+  import { api, type Download } from '../lib/api'
+  import { enableNotifications, getPushStatus } from '../lib/push'
   import { showToast } from '../lib/toast'
 
   type Tab = 'all' | 'matching' | 'active' | 'completed' | 'failed'
@@ -24,13 +18,6 @@
   let needsHttps = $state(false)
   let needsInstall = $state(false)
   let isIos = $state(false)
-  let prefs = $state<NotificationPrefs>({
-    notify_imported: true,
-    notify_download_finished: false,
-    notify_pack_ready: true,
-    notify_failures: true,
-  })
-  let prefsBusy = $state(false)
   let tab = $state<Tab>('all')
   let removingId = $state<number | null>(null)
   let refreshingId = $state<number | null>(null)
@@ -120,7 +107,6 @@
     needsHttps = status.needsHttps
     needsInstall = status.needsInstall
     isIos = status.isIos
-    prefs = status.preferences
   }
 
   onMount(() => {
@@ -194,57 +180,19 @@
   async function togglePush() {
     pushBusy = true
     try {
-      if (pushSubscribed) {
-        await disableNotifications()
-        pushSubscribed = false
-        showToast('Notifications disabled')
-      } else {
-        await enableNotifications()
-        pushSubscribed = true
-        showToast('Notifications enabled')
-        try {
-          await sendTestNotification()
-        } catch {
-          /* optional */
-        }
-      }
+      await enableNotifications()
+      pushSubscribed = true
+      showToast(
+        isIos
+          ? 'Notifications enabled — delivery requires Home Screen app (iOS 16.4+)'
+          : 'Notifications enabled',
+      )
+      await refreshPush()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Push failed')
       await refreshPush()
     } finally {
       pushBusy = false
-    }
-  }
-
-  async function testPush() {
-    pushBusy = true
-    try {
-      if (!pushSubscribed) {
-        await enableNotifications()
-        pushSubscribed = true
-      }
-      await sendTestNotification()
-      showToast(isIos ? 'Test sent — check Notification Center' : 'Test notification sent')
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Test failed')
-      await refreshPush()
-    } finally {
-      pushBusy = false
-    }
-  }
-
-  async function togglePref(key: keyof NotificationPrefs) {
-    const next = { ...prefs, [key]: !prefs[key] }
-    prefs = next
-    if (!pushSubscribed) return
-    prefsBusy = true
-    try {
-      await saveNotificationPrefs(next)
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not save notification settings')
-      await refreshPush()
-    } finally {
-      prefsBusy = false
     }
   }
 
@@ -275,71 +223,19 @@
       </p>
     </div>
     <div class="push-actions">
-      {#if pushSupported}
-        <button class="secondary" type="button" disabled={pushBusy} onclick={togglePush}>
-          {#if pushBusy}
-            Working…
-          {:else if pushSubscribed}
-            Notifications on
-          {:else}
-            Enable notifications
-          {/if}
+      {#if pushSupported && !pushSubscribed}
+        <button class="secondary" type="button" disabled={pushBusy || needsInstall} onclick={togglePush}>
+          {pushBusy ? 'Working…' : 'Enable notifications'}
         </button>
-        <button class="secondary" type="button" disabled={pushBusy} onclick={testPush}>
-          Send test
-        </button>
-      {:else if needsInstall}
-        <span class="muted tiny">Install to Home Screen to enable</span>
       {/if}
+      <a class="btn secondary" href="#/account">Notification settings</a>
     </div>
   </div>
 
   {#if needsInstall}
     <div class="banner-warn ios-hint">
-      On iPhone/iPad, open Safari → Share → <strong>Add to Home Screen</strong>, then launch
+      On iPhone/iPad (iOS 16.4+), open Safari → Share → <strong>Add to Home Screen</strong>, then launch
       Audiobooker from the home-screen icon (not a Safari tab) to enable notifications.
-    </div>
-  {/if}
-
-  {#if pushSupported || pushSubscribed}
-    <div class="notify-prefs" class:dim={!pushSubscribed}>
-      <p class="muted tiny prefs-label">Notify me when</p>
-      <label class="pref">
-        <input
-          type="checkbox"
-          checked={prefs.notify_imported}
-          disabled={prefsBusy || !pushSubscribed}
-          onchange={() => togglePref('notify_imported')}
-        />
-        Ready in library
-      </label>
-      <label class="pref">
-        <input
-          type="checkbox"
-          checked={prefs.notify_pack_ready}
-          disabled={prefsBusy || !pushSubscribed}
-          onchange={() => togglePref('notify_pack_ready')}
-        />
-        Pack ready to map
-      </label>
-      <label class="pref">
-        <input
-          type="checkbox"
-          checked={prefs.notify_download_finished}
-          disabled={prefsBusy || !pushSubscribed}
-          onchange={() => togglePref('notify_download_finished')}
-        />
-        Download finished (before import)
-      </label>
-      <label class="pref">
-        <input
-          type="checkbox"
-          checked={prefs.notify_failures}
-          disabled={prefsBusy || !pushSubscribed}
-          onchange={() => togglePref('notify_failures')}
-        />
-        Failures
-      </label>
     </div>
   {/if}
 

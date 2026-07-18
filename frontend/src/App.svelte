@@ -45,6 +45,7 @@
     '/browse': Browse,
     '/map/:id': MapPack,
     '/password': ChangePassword,
+    '/account': ChangePassword,
   }
 
   const publicRoutes = {
@@ -98,7 +99,7 @@
     if (path.startsWith('/settings')) return 'Settings'
     if (path.startsWith('/users')) return 'Users'
     if (path.startsWith('/api-key')) return 'API Key'
-    if (path.startsWith('/password')) return 'Password'
+    if (path.startsWith('/password') || path.startsWith('/account')) return 'Account'
     return 'Queue'
   }
 </script>
@@ -134,7 +135,7 @@
           <a href="#/users" class:active={path === '/users'}>Users</a>
           <a href="#/api-key" class:active={path === '/api-key'}>API Key</a>
         {/if}
-        <a href="#/password" class:active={path === '/password'}>Password</a>
+        <a href="#/account" class:active={path === '/password' || path === '/account'}>Account</a>
         <button class="linkish" type="button" onclick={logout}>Sign out</button>
       </nav>
 
@@ -149,7 +150,7 @@
             <a href="#/users" class:active={path === '/users'}>Users</a>
             <a href="#/api-key" class:active={path === '/api-key'}>API Key</a>
           {/if}
-          <a href="#/password" class:active={path === '/password'}>Password</a>
+          <a href="#/account" class:active={path === '/password' || path.startsWith('/account')}>Account</a>
           <button class="linkish" type="button" onclick={logout}>Sign out</button>
         </nav>
       {/if}
@@ -171,7 +172,7 @@
         <a href="#/browse" class:active={path.startsWith('/browse')}>
           <span class="bn-label">Discover</span>
         </a>
-        <a href="#/password" class:active={path.startsWith('/password')}>
+        <a href="#/account" class:active={path.startsWith('/password') || path.startsWith('/account')}>
           <span class="bn-label">Account</span>
         </a>
       </nav>

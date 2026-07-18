@@ -21,6 +21,8 @@
   let contentPath = $state<string | null>(null)
   let loading = $state(true)
   let selectedPath = $state<string | null>(null)
+  let selectedPaths = $state<Set<string>>(new Set())
+  let selectedIsDir = $state(false)
   let title = $state('')
   let author = $state('')
   let asin = $state('')
@@ -33,11 +35,18 @@
   let expanded = $state<Set<string>>(new Set())
   let timer: number | undefined
 
-  const mappedPaths = $derived(new Set((download?.items || []).map((i) => i.source_path)))
+  const mappedPaths = $derived(
+    new Set(
+      (download?.items || []).flatMap((i) =>
+        i.source_paths?.length ? i.source_paths : [i.source_path],
+      ),
+    ),
+  )
   const failedCount = $derived(
     (download?.items || []).filter((i) => i.status === 'error').length,
   )
   const tree = $derived(buildTree(files))
+  const selectionCount = $derived(selectedPaths.size)
 
   function stripExtension(name: string) {
     return name.replace(/\.(m4b|m4a|mp3|flac|ogg|opus|aac|wma|wav|mp4|mka|pdf|epub)$/i, '')
@@ -45,15 +54,7 @@
 
   function parseFolderName(path: string) {
     const raw = path.split('/').filter(Boolean).pop() || path
-    const name = stripExtension(raw)
-    const idx = name.lastIndexOf(' - ')
-    if (idx > 0) {
-      return {
-        title: stripExtension(name.slice(0, idx).trim()),
-        author: stripExtension(name.slice(idx + 3).trim()),
-      }
-    }
-    return { title: name, author: '' }
+    return { title: stripExtension(raw), author: '' }
   }
 
   function buildTree(entries: ContentEntry[]): TreeNode[] {
@@ -176,11 +177,39 @@
     if (timer) clearInterval(timer)
   })
 
-  function selectSource(path: string) {
-    selectedPath = path
-    const parsed = parseFolderName(path)
-    title = parsed.title
-    author = parsed.author
+  function selectSource(path: string, isDir: boolean) {
+    if (mappedPaths.has(path)) return
+    if (isDir) {
+      selectedPaths = new Set([path])
+      selectedIsDir = true
+      selectedPath = path
+    } else {
+      const next = selectedIsDir ? new Set<string>() : new Set(selectedPaths)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      selectedPaths = next
+      selectedIsDir = false
+      selectedPath = next.size ? [...next].at(-1)! : null
+    }
+    const focus = selectedPath
+    if (focus) {
+      const parsed = parseFolderName(focus)
+      title = parsed.title
+      author = ''
+    } else {
+      title = ''
+      author = ''
+    }
+    asin = ''
+    matches = []
+  }
+
+  function clearSelection() {
+    selectedPaths = new Set()
+    selectedIsDir = false
+    selectedPath = null
+    title = ''
+    author = ''
     asin = ''
     matches = []
   }
@@ -209,7 +238,7 @@
   }
 
   async function mapMatch(m: any) {
-    if (!selectedPath) {
+    if (!selectedPaths.size) {
       showToast('Select a folder or file first')
       return
     }
@@ -219,15 +248,19 @@
     }
     saving = true
     try {
+      const paths = [...selectedPaths]
       const data = await api.mapDownloadItem(Number(params.id), {
-        source_path: selectedPath,
+        source_paths: paths,
         match_data: m,
         library_id: libraryId ?? undefined,
       })
       download = data.download
-      showToast(`Mapped ${m.title}`)
-      selectedPath = null
-      matches = []
+      showToast(
+        paths.length > 1
+          ? `Mapped ${paths.length} files as ${m.title}`
+          : `Mapped ${m.title}`,
+      )
+      clearSelection()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not map')
     } finally {
@@ -311,8 +344,8 @@
           · files from {filesSource}
         </p>
         <p class="muted">
-          Map folders that contain a whole book (multi-file) or individual files. You can keep mapping
-          after the download finishes — imports retry when paths move from incomplete → complete.
+          Map a whole folder as one book, or multi-select loose chapter files and map them as one
+          title. Imports retry when paths move from incomplete → complete.
         </p>
         {#if contentPath}
           <p class="muted tiny path-hint">Current qBit path: <code>{contentPath}</code></p>
@@ -360,10 +393,13 @@
       {:else}
         <div class="mapped-list">
           {#each download.items as item}
+            {@const paths = item.source_paths?.length ? item.source_paths : [item.source_path]}
             <div class="mapped-row" class:failed={item.status === 'error'}>
               <div>
-                <strong>{item.metadata?.title || item.source_path}</strong>
-                <div class="muted path-line">{item.source_path}</div>
+                <strong>{item.metadata?.title || paths[0]}</strong>
+                {#each paths as p}
+                  <div class="muted path-line">{p}</div>
+                {/each}
                 <span class="badge {item.status}">{item.status}</span>
                 {#if item.error_message}
                   <div class="err">{item.error_message}</div>
@@ -379,10 +415,26 @@
     </div>
 
     <div class="card stack">
-      <h3>Audible match{#if selectedPath} for <code>{selectedPath}</code>{/if}</h3>
-      {#if !selectedPath}
-        <p class="muted">Select a folder or file in the tree.</p>
+      <h3>
+        Audible match
+        {#if selectionCount > 1}
+          for <code>{selectionCount} files</code>
+        {:else if selectedPath}
+          for <code>{selectedPath}</code>
+        {/if}
+      </h3>
+      {#if !selectionCount}
+        <p class="muted">Select a folder, or tap files to multi-select chapters.</p>
       {:else}
+        {#if selectionCount > 1}
+          <p class="map-cta">Map {selectionCount} files as one book</p>
+          <ul class="sel-list">
+            {#each [...selectedPaths] as p}
+              <li><code>{p}</code></li>
+            {/each}
+          </ul>
+          <button class="secondary tiny-btn" type="button" onclick={clearSelection}>Clear selection</button>
+        {/if}
         {#if libraries.length > 1}
           <label>Library
             <select
@@ -407,7 +459,7 @@
             <input bind:value={title} />
           </label>
           <label>Author
-            <input bind:value={author} />
+            <input bind:value={author} placeholder="Optional — type to narrow search" />
           </label>
           <label>Or ASIN
             <input bind:value={asin} />
@@ -435,18 +487,19 @@
   {@const mapped = mappedPaths.has(node.path)}
   {@const isOpen = expanded.has(node.path)}
   {@const nestedMapped = node.is_dir ? childMappedCount(node) : 0}
+  {@const selected = selectedPaths.has(node.path)}
   <div
     class="tree-node"
     style={`--depth:${depth}`}
     role="treeitem"
-    aria-selected={selectedPath === node.path}
+    aria-selected={selected}
     aria-expanded={node.is_dir ? isOpen : undefined}
   >
     <div
       class="tree-row"
       class:dir={node.is_dir}
       class:file={!node.is_dir}
-      class:selected={selectedPath === node.path}
+      class:selected
       class:mapped
     >
       {#if node.is_dir}
@@ -466,7 +519,7 @@
         type="button"
         class="pick"
         disabled={mapped}
-        onclick={() => selectSource(node.path)}
+        onclick={() => selectSource(node.path, node.is_dir)}
       >
         <span class="icon" class:folder={node.is_dir} class:audio={!node.is_dir} aria-hidden="true"></span>
         <span class="label">{node.name}</span>
@@ -477,6 +530,9 @@
           <span class="meta">{formatSize(node.size)}</span>
         {/if}
         {#if mapped}<span class="mapped-pill">mapped</span>{/if}
+        {#if selected && !mapped && !node.is_dir && selectionCount > 1}
+          <span class="mapped-pill">selected</span>
+        {/if}
       </button>
     </div>
 
@@ -680,6 +736,18 @@
     font-size: 0.78rem;
     word-break: break-all;
     margin: 0.2rem 0 0.35rem;
+  }
+  .map-cta {
+    font-weight: 700;
+    margin: 0;
+    color: var(--accent);
+  }
+  .sel-list {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-size: 0.82rem;
+    max-height: 8rem;
+    overflow: auto;
   }
   .err {
     color: var(--danger);

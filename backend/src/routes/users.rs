@@ -7,8 +7,9 @@ use serde_json::{Value, json};
 
 use crate::auth::{AuthSession, hash_password};
 use crate::error::{AppError, AppResult};
-use crate::models::{Library, User};
+use crate::models::{Library, USER_COLUMNS, User};
 use crate::state::AppState;
+use serde::Deserializer;
 
 #[derive(Deserialize)]
 pub struct CreateUserRequest {
@@ -22,6 +23,36 @@ pub struct UpdateUserRequest {
     pub password: Option<String>,
     pub library_ids: Option<Vec<i64>>,
     pub must_change_password: Option<bool>,
+    /// Present in JSON (including null) to set/clear; omitted leaves unchanged.
+    #[serde(default, deserialize_with = "deserialize_opt_opt_i64")]
+    pub rate_limit_requests: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "deserialize_opt_opt_i64")]
+    pub rate_limit_window_secs: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "deserialize_opt_opt_i64")]
+    pub rate_limit_active_torrents: Option<Option<i64>>,
+}
+
+fn deserialize_opt_opt_i64<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::<i64>::deserialize(deserializer)?))
+}
+
+fn user_json(u: &User, libraries: &[Library]) -> Value {
+    json!({
+        "id": u.id,
+        "username": u.username,
+        "role": u.role,
+        "must_change_password": u.must_change_password,
+        "abs_user_id": u.abs_user_id,
+        "created_at": u.created_at,
+        "rate_limit_requests": u.rate_limit_requests,
+        "rate_limit_window_secs": u.rate_limit_window_secs,
+        "rate_limit_active_torrents": u.rate_limit_active_torrents,
+        "libraries": libraries,
+        "library_ids": libraries.iter().map(|l| l.id).collect::<Vec<_>>(),
+    })
 }
 
 async fn libraries_for_user(pool: &sqlx::SqlitePool, user_id: i64) -> AppResult<Vec<Library>> {
@@ -75,9 +106,9 @@ async fn set_user_libraries(
 
 pub async fn list(State(state): State<AppState>, auth: AuthSession) -> AppResult<Json<Value>> {
     auth.require_root()?;
-    let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users ORDER BY id",
-    )
+    let users = sqlx::query_as::<_, User>(&format!(
+        "SELECT {USER_COLUMNS} FROM users ORDER BY id"
+    ))
     .fetch_all(&state.pool)
     .await?;
 
@@ -88,16 +119,7 @@ pub async fn list(State(state): State<AppState>, auth: AuthSession) -> AppResult
         } else {
             libraries_for_user(&state.pool, u.id).await?
         };
-        items.push(json!({
-            "id": u.id,
-            "username": u.username,
-            "role": u.role,
-            "must_change_password": u.must_change_password,
-            "abs_user_id": u.abs_user_id,
-            "created_at": u.created_at,
-            "libraries": libraries,
-            "library_ids": libraries.iter().map(|l| l.id).collect::<Vec<_>>(),
-        }));
+        items.push(user_json(&u, &libraries));
     }
     Ok(Json(json!({ "users": items })))
 }
@@ -179,9 +201,9 @@ pub async fn update(
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<Value>> {
     auth.require_root()?;
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users WHERE id = ?",
-    )
+    let user = sqlx::query_as::<_, User>(&format!(
+        "SELECT {USER_COLUMNS} FROM users WHERE id = ?"
+    ))
     .bind(id)
     .fetch_optional(&state.pool)
     .await?
@@ -220,17 +242,53 @@ pub async fn update(
         set_user_libraries(&state.pool, id, &library_ids).await?;
     }
 
+    if body.rate_limit_requests.is_some()
+        || body.rate_limit_window_secs.is_some()
+        || body.rate_limit_active_torrents.is_some()
+    {
+        // Allow explicit 0 to mean unlimited override; null clears (inherit global).
+        let rate_limit_requests = match body.rate_limit_requests {
+            Some(Some(v)) => Some(v.max(0)),
+            Some(None) => None,
+            None => user.rate_limit_requests,
+        };
+        let rate_limit_window_secs = match body.rate_limit_window_secs {
+            Some(Some(v)) => Some(v.max(60)),
+            Some(None) => None,
+            None => user.rate_limit_window_secs,
+        };
+        let rate_limit_active_torrents = match body.rate_limit_active_torrents {
+            Some(Some(v)) => Some(v.max(0)),
+            Some(None) => None,
+            None => user.rate_limit_active_torrents,
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE users SET
+                rate_limit_requests = ?,
+                rate_limit_window_secs = ?,
+                rate_limit_active_torrents = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(rate_limit_requests)
+        .bind(rate_limit_window_secs)
+        .bind(rate_limit_active_torrents)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    let user = sqlx::query_as::<_, User>(&format!(
+        "SELECT {USER_COLUMNS} FROM users WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
     let libraries = libraries_for_user(&state.pool, id).await?;
-    Ok(Json(json!({
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "role": user.role,
-            "must_change_password": body.must_change_password.unwrap_or(user.must_change_password),
-            "libraries": libraries,
-            "library_ids": libraries.iter().map(|l| l.id).collect::<Vec<_>>(),
-        }
-    })))
+    Ok(Json(json!({ "user": user_json(&user, &libraries) })))
 }
 
 pub async fn delete(
@@ -239,9 +297,9 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> AppResult<Json<Value>> {
     auth.require_root()?;
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, must_change_password, notify_imported, notify_download_finished, notify_pack_ready, notify_failures, abs_user_id, created_at, updated_at FROM users WHERE id = ?",
-    )
+    let user = sqlx::query_as::<_, User>(&format!(
+        "SELECT {USER_COLUMNS} FROM users WHERE id = ?"
+    ))
     .bind(id)
     .fetch_optional(&state.pool)
     .await?

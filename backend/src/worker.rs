@@ -5,11 +5,12 @@ use chrono::Utc;
 use sqlx::SqlitePool;
 
 use crate::files::{
-    build_library_relative_path, copy_completed, resolve_download_source, resolve_item_source,
+    build_library_relative_path, copy_completed, copy_sources_into_library, resolve_download_source,
+    resolve_item_source,
 };
 use crate::models::{
-    BookMetadata, BookMetadataPublic, Download, DownloadItem, Library, NotifyKind, Settings,
-    USER_COLUMNS, User,
+    BookMetadata, BookMetadataPublic, Download, DownloadItem, DownloadItemSource, Library,
+    NotifyKind, Settings, USER_COLUMNS, User,
 };
 use crate::push::{PushPayload, ensure_vapid_keys, notify_user};
 use crate::qbittorrent::{QbittorrentClient, map_state};
@@ -520,26 +521,54 @@ async fn import_pack(
             continue;
         };
 
-        let source = resolve_item_source(
-            download.content_path.as_deref(),
-            download.save_path.as_deref(),
-            &settings.download_path,
-            &item.source_path,
-        );
-        if !source.exists() {
+        let source_rows = sqlx::query_as::<_, DownloadItemSource>(
+            "SELECT * FROM download_item_sources WHERE download_item_id = ? ORDER BY source_path",
+        )
+        .bind(item.id)
+        .fetch_all(pool)
+        .await?;
+        let rel_paths: Vec<String> = if source_rows.is_empty() {
+            vec![item.source_path.clone()]
+        } else {
+            source_rows.into_iter().map(|r| r.source_path).collect()
+        };
+
+        let mut resolved = Vec::new();
+        let mut missing = Vec::new();
+        for rel in &rel_paths {
+            let source = resolve_item_source(
+                download.content_path.as_deref(),
+                download.save_path.as_deref(),
+                &settings.download_path,
+                rel,
+            );
+            if source.exists() {
+                resolved.push(source);
+            } else {
+                missing.push(format!("{} ({})", rel, source.display()));
+            }
+        }
+        if resolved.is_empty() {
             sqlx::query(
                 "UPDATE download_items SET status = 'error', error_message = ?, updated_at = datetime('now') WHERE id = ?",
             )
             .bind(format!(
                 "Source not found (torrent may still be in incomplete, or path moved): {}",
-                source.display()
+                missing.join("; ")
             ))
             .bind(item.id)
             .execute(pool)
             .await?;
             continue;
         }
-        match copy_completed(&source, Path::new(&library_root), &relative).await {
+        if !missing.is_empty() {
+            tracing::warn!(
+                item_id = item.id,
+                missing = %missing.join("; "),
+                "some pack item sources missing; copying available files"
+            );
+        }
+        match copy_sources_into_library(&resolved, Path::new(&library_root), &relative).await {
             Ok(dest) => {
                 sqlx::query(
                     r#"

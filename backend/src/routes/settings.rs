@@ -26,6 +26,9 @@ pub struct UpdateSettingsRequest {
     pub abs_user_sync_interval_ms: Option<i64>,
     pub abs_user_default_password: Option<String>,
     pub abs_user_sync_libraries: Option<bool>,
+    pub rate_limit_requests: Option<i64>,
+    pub rate_limit_window_secs: Option<i64>,
+    pub rate_limit_active_torrents: Option<i64>,
 }
 
 pub async fn get(State(state): State<AppState>, auth: AuthSession) -> AppResult<Json<Value>> {
@@ -106,6 +109,15 @@ pub async fn update(
     if let Some(v) = body.abs_user_sync_libraries {
         settings.abs_user_sync_libraries = v;
     }
+    if let Some(v) = body.rate_limit_requests {
+        settings.rate_limit_requests = v.max(0);
+    }
+    if let Some(v) = body.rate_limit_window_secs {
+        settings.rate_limit_window_secs = v.max(60);
+    }
+    if let Some(v) = body.rate_limit_active_torrents {
+        settings.rate_limit_active_torrents = v.max(0);
+    }
 
     sqlx::query(
         r#"
@@ -126,6 +138,9 @@ pub async fn update(
             abs_user_sync_interval_ms = ?,
             abs_user_default_password = ?,
             abs_user_sync_libraries = ?,
+            rate_limit_requests = ?,
+            rate_limit_window_secs = ?,
+            rate_limit_active_torrents = ?,
             updated_at = datetime('now')
         WHERE id = 1
         "#,
@@ -146,6 +161,9 @@ pub async fn update(
     .bind(settings.abs_user_sync_interval_ms)
     .bind(&settings.abs_user_default_password)
     .bind(settings.abs_user_sync_libraries)
+    .bind(settings.rate_limit_requests)
+    .bind(settings.rate_limit_window_secs)
+    .bind(settings.rate_limit_active_torrents)
     .execute(&state.pool)
     .await?;
 

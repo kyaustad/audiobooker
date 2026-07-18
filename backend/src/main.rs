@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod error;
 mod files;
+mod limits;
 mod magnet;
 mod metadata;
 mod models;

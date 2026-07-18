@@ -39,6 +39,10 @@ pub struct User {
     pub notify_pack_ready: bool,
     pub notify_failures: bool,
     pub abs_user_id: Option<String>,
+    /// NULL = inherit global settings.
+    pub rate_limit_requests: Option<i64>,
+    pub rate_limit_window_secs: Option<i64>,
+    pub rate_limit_active_torrents: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -46,7 +50,8 @@ pub struct User {
 /// Column list for `User` FromRow queries (keep in sync with struct fields).
 pub const USER_COLUMNS: &str = "id, username, password_hash, role, must_change_password, \
     notify_imported, notify_download_finished, notify_pack_ready, notify_failures, \
-    abs_user_id, created_at, updated_at";
+    abs_user_id, rate_limit_requests, rate_limit_window_secs, rate_limit_active_torrents, \
+    created_at, updated_at";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationPrefs {
@@ -122,6 +127,10 @@ pub struct Settings {
     pub abs_user_default_password: String,
     pub abs_user_sync_libraries: bool,
     pub abs_user_last_sync_at: Option<String>,
+    /// 0 = unlimited.
+    pub rate_limit_requests: i64,
+    pub rate_limit_window_secs: i64,
+    pub rate_limit_active_torrents: i64,
     pub updated_at: String,
 }
 
@@ -145,6 +154,9 @@ pub struct SettingsPublic {
     pub abs_user_default_password_set: bool,
     pub abs_user_sync_libraries: bool,
     pub abs_user_last_sync_at: Option<String>,
+    pub rate_limit_requests: i64,
+    pub rate_limit_window_secs: i64,
+    pub rate_limit_active_torrents: i64,
 }
 
 impl From<Settings> for SettingsPublic {
@@ -168,6 +180,9 @@ impl From<Settings> for SettingsPublic {
             abs_user_default_password_set: !s.abs_user_default_password.is_empty(),
             abs_user_sync_libraries: s.abs_user_sync_libraries,
             abs_user_last_sync_at: s.abs_user_last_sync_at,
+            rate_limit_requests: s.rate_limit_requests,
+            rate_limit_window_secs: s.rate_limit_window_secs,
+            rate_limit_active_torrents: s.rate_limit_active_torrents,
         }
     }
 }
@@ -247,10 +262,19 @@ pub struct BookMetadata {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct DownloadItemSource {
+    pub id: i64,
+    pub download_id: i64,
+    pub download_item_id: i64,
+    pub source_path: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadItemWithMetadata {
     #[serde(flatten)]
     pub item: DownloadItem,
+    pub source_paths: Vec<String>,
     pub metadata: Option<BookMetadataPublic>,
 }
 

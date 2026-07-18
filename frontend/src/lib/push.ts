@@ -48,10 +48,10 @@ export async function getPushStatus(): Promise<PushCapability> {
   const hasPush = 'serviceWorker' in navigator && 'PushManager' in window
   const needsInstall = ios && !standalone
 
-  if (!hasPush) {
+  if (!hasPush || needsInstall) {
     return {
-      supported: false,
-      permission: 'denied',
+      supported: hasPush && !needsInstall,
+      permission: typeof Notification !== 'undefined' ? Notification.permission : 'denied',
       subscribed: false,
       needsHttps,
       needsInstall,
@@ -89,20 +89,26 @@ export async function enableNotifications() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     if (isIosDevice() && !isStandalonePwa()) {
       throw new Error(
-        'On iPhone/iPad, install Audiobooker to your Home Screen first, then open it from the icon and enable notifications.',
+        'On iPhone/iPad (iOS 16.4+), install Audiobooker to your Home Screen first, then open it from the icon and enable notifications.',
       )
     }
     throw new Error('Push notifications are not supported in this browser')
+  }
+  if (isIosDevice() && !isStandalonePwa()) {
+    throw new Error(
+      'On iPhone/iPad (iOS 16.4+), install Audiobooker to your Home Screen first, then open it from the icon and enable notifications.',
+    )
   }
   if (!window.isSecureContext && location.hostname !== 'localhost') {
     throw new Error('Notifications require HTTPS (or localhost)')
   }
 
-  const permission = await Notification.requestPermission()
-  if (permission !== 'granted') throw new Error('Notification permission denied')
-
+  // Register SW and wait until ready before prompting for permission (iOS-friendly order).
   const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
   await navigator.serviceWorker.ready
+
+  const permission = await Notification.requestPermission()
+  if (permission !== 'granted') throw new Error('Notification permission denied')
 
   const { vapid_public_key } = await api.ensureVapid()
   const key = urlBase64ToUint8Array(vapid_public_key)

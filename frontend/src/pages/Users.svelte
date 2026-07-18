@@ -12,6 +12,9 @@
   let editingId = $state<number | null>(null)
   let editPassword = $state('')
   let editLibraryIds = $state<number[]>([])
+  let editRateRequests = $state('')
+  let editRateWindow = $state('')
+  let editRateActive = $state('')
 
   async function refresh() {
     const [u, libs] = await Promise.all([api.listUsers(), api.listLibraries()])
@@ -57,12 +60,25 @@
     editingId = u.id
     editPassword = ''
     editLibraryIds = [...(u.library_ids || u.libraries?.map((l) => l.id) || [])]
+    editRateRequests = u.rate_limit_requests == null ? '' : String(u.rate_limit_requests)
+    editRateWindow = u.rate_limit_window_secs == null ? '' : String(u.rate_limit_window_secs)
+    editRateActive = u.rate_limit_active_torrents == null ? '' : String(u.rate_limit_active_torrents)
+  }
+
+  function parseOverride(raw: string): number | null {
+    const t = raw.trim()
+    if (!t) return null
+    const n = Number(t)
+    return Number.isFinite(n) ? n : null
   }
 
   async function saveEdit(id: number) {
     try {
       await api.updateUser(id, {
         library_ids: editLibraryIds,
+        rate_limit_requests: parseOverride(editRateRequests),
+        rate_limit_window_secs: parseOverride(editRateWindow),
+        rate_limit_active_torrents: parseOverride(editRateActive),
         ...(editPassword ? { password: editPassword, must_change_password: true } : {}),
       })
       showToast('User updated')
@@ -148,6 +164,16 @@
               <div class="muted user-libs">
                 {(u.libraries || []).map((l) => l.name).join(', ') || 'No libraries'}
               </div>
+              {#if u.rate_limit_requests != null || u.rate_limit_active_torrents != null}
+                <div class="muted user-libs">
+                  Rate limits:
+                  {#if u.rate_limit_requests != null}{u.rate_limit_requests} req{/if}
+                  {#if u.rate_limit_window_secs != null} / {u.rate_limit_window_secs}s{/if}
+                  {#if u.rate_limit_active_torrents != null}
+                    · {u.rate_limit_active_torrents} active
+                  {/if}
+                </div>
+              {/if}
             {/if}
           </div>
           {#if u.role !== 'root'}
@@ -163,6 +189,17 @@
             <label>Reset password (optional)
               <input bind:value={editPassword} type="password" minlength="8" placeholder="Leave blank to keep" />
             </label>
+            <div class="row rate-row">
+              <label>Req limit (blank = global)
+                <input bind:value={editRateRequests} type="number" min="0" placeholder="Global" />
+              </label>
+              <label>Window secs
+                <input bind:value={editRateWindow} type="number" min="60" placeholder="Global" />
+              </label>
+              <label>Active torrents
+                <input bind:value={editRateActive} type="number" min="0" placeholder="Global" />
+              </label>
+            </div>
             <div class="lib-picker">
               <div class="lib-picker-label">Libraries</div>
               <div class="lib-list">
@@ -278,5 +315,10 @@
     border-radius: 8px;
     padding: 0.85rem;
     margin-bottom: 0.75rem;
+  }
+  .rate-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.65rem;
   }
 </style>
