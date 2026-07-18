@@ -467,7 +467,7 @@
                   </button>
                 {:else if item.status === 'copying'}
                   <button class="secondary" type="button" disabled={retrying} onclick={resetStuckCopy}>
-                    Reset stuck copy
+                    Reset copy
                   </button>
                 {:else}
                   <button class="danger" type="button" onclick={() => unmap(item.id)}>Unmap</button>
@@ -623,6 +623,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
+    justify-content: flex-end;
   }
   .path-hint {
     margin: 0.35rem 0 0;
@@ -639,6 +640,7 @@
     justify-content: space-between;
     align-items: center;
     gap: 0.5rem;
+    flex-wrap: wrap;
   }
   .sources-actions {
     display: flex;
@@ -802,28 +804,45 @@
   .mapped-meta-block {
     min-width: 0;
   }
+  .mapped-meta-block strong {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.3;
+  }
+  .mapped-meta-block .badge {
+    margin-top: 0.35rem;
+  }
   .mapped-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
     justify-content: flex-end;
     width: 100%;
+    padding-top: 0.55rem;
+    border-top: 1px solid var(--border);
   }
   .mapped-actions button {
     flex: 0 0 auto;
     white-space: nowrap;
   }
   @media (max-width: 520px) {
+    .mapped-actions {
+      justify-content: stretch;
+    }
     .mapped-actions button {
       flex: 1 1 auto;
       justify-content: center;
+      text-align: center;
     }
   }
   .path-line {
     font-family: var(--mono);
     font-size: 0.78rem;
     word-break: break-all;
-    margin: 0.2rem 0 0.35rem;
+    margin: 0.2rem 0 0.15rem;
   }
   .map-cta {
     font-weight: 700;
@@ -841,6 +860,7 @@
     color: var(--danger);
     font-size: 0.85rem;
     margin-top: 0.25rem;
+    word-break: break-word;
   }
   .match-fields {
     gap: 0.65rem;
@@ -861,6 +881,22 @@
     }
     .tree {
       max-height: 22rem;
+    }
+    .header-actions {
+      width: 100%;
+    }
+    .header-actions > * {
+      flex: 1 1 calc(50% - 0.25rem);
+      text-align: center;
+      justify-content: center;
+    }
+    .header-actions a.btn {
+      display: inline-flex;
+    }
+  }
+  @media (max-width: 480px) {
+    .header-actions > * {
+      flex: 1 1 100%;
     }
   }
 </style>

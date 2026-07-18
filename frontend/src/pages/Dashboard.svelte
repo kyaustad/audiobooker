@@ -68,12 +68,17 @@
     return d.status === 'error' && Boolean(d.metadata)
   }
 
+  function showReimport(d: Download) {
+    return !isPack(d) && d.status === 'imported' && Boolean(d.metadata)
+  }
+
   function hasActions(d: Download) {
     return (
       d.status === 'awaiting_match' ||
       showMap(d) ||
       showRefreshQbit(d) ||
       showRetryImport(d) ||
+      showReimport(d) ||
       canRemove(d)
     )
   }
@@ -202,6 +207,27 @@
       await refresh()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Retry failed')
+    } finally {
+      retryingId = null
+    }
+  }
+
+  async function reimport(d: Download) {
+    const label = d.metadata?.title || d.name || 'this book'
+    if (
+      !window.confirm(
+        `Re-import “${label}”?\n\nThis replaces the files in your library folder with a fresh copy from the download.`,
+      )
+    ) {
+      return
+    }
+    retryingId = d.id
+    try {
+      await api.reimportDownload(d.id)
+      showToast('Re-import queued — overwriting library copy')
+      await refresh()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Re-import failed')
     } finally {
       retryingId = null
     }
@@ -361,7 +387,7 @@
                 <a class="btn" href={`#/match/${d.id}`}>Match</a>
               {/if}
               {#if showMap(d)}
-                <a class="btn" href={`#/map/${d.id}`}>
+                <a class="btn primary-action" href={`#/map/${d.id}`}>
                   {d.status === 'imported' || d.status === 'partial' ? 'Map more' : 'Map'}
                 </a>
               {/if}
@@ -372,7 +398,24 @@
                   disabled={retryingId === d.id}
                   onclick={() => retryImport(d)}
                 >
-                  {retryingId === d.id ? '…' : d.status === 'copying' ? 'Reset stuck copy' : 'Retry import'}
+                  {#if retryingId === d.id}
+                    …
+                  {:else if d.status === 'copying'}
+                    <span class="hide-mobile">Reset stuck copy</span>
+                    <span class="show-mobile">Reset copy</span>
+                  {:else}
+                    Retry import
+                  {/if}
+                </button>
+              {/if}
+              {#if showReimport(d)}
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={retryingId === d.id}
+                  onclick={() => reimport(d)}
+                >
+                  {retryingId === d.id ? '…' : 'Re-import'}
                 </button>
               {/if}
               {#if showRefreshQbit(d)}
@@ -382,7 +425,12 @@
                   disabled={refreshingId === d.id}
                   onclick={() => refreshQbit(d)}
                 >
-                  {refreshingId === d.id ? '…' : 'Refresh qBit'}
+                  {#if refreshingId === d.id}
+                    …
+                  {:else}
+                    <span class="hide-mobile">Refresh qBit</span>
+                    <span class="show-mobile">Refresh</span>
+                  {/if}
                 </button>
               {/if}
               {#if canRemove(d)}
@@ -519,6 +567,7 @@
   .title {
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
     line-height: 1.25;
@@ -561,7 +610,7 @@
     flex-direction: column;
     gap: 0.4rem;
     align-items: stretch;
-    min-width: 5.5rem;
+    min-width: 7.25rem;
   }
   .actions:empty {
     display: none;
@@ -570,6 +619,9 @@
   .actions button {
     text-align: center;
     justify-content: center;
+    white-space: nowrap;
+    padding-left: 0.65rem;
+    padding-right: 0.65rem;
   }
   .download-item.done {
     opacity: 0.92;
@@ -580,9 +632,15 @@
   .hide-mobile {
     display: block;
   }
+  .show-mobile {
+    display: none;
+  }
   @media (max-width: 640px) {
     .hide-mobile {
       display: none;
+    }
+    .show-mobile {
+      display: inline;
     }
     .download-item {
       grid-template-columns: 56px 1fr;
@@ -591,9 +649,6 @@
         'actions actions';
       gap: 0.55rem 0.7rem;
       padding: 0.75rem;
-    }
-    .download-item.done {
-      grid-template-areas: 'cover meta';
     }
     .cover {
       grid-area: cover;
@@ -609,15 +664,19 @@
       flex-direction: row;
       flex-wrap: wrap;
       min-width: 0;
-      padding-top: 0.15rem;
+      padding-top: 0.55rem;
+      margin-top: 0.1rem;
       border-top: 1px solid var(--border);
     }
     .actions .btn,
     .actions button {
       flex: 1 1 calc(50% - 0.25rem);
-      min-width: 0;
-      padding: 0.5rem 0.65rem;
-      font-size: 0.88rem;
+      min-width: calc(50% - 0.25rem);
+      padding: 0.55rem 0.5rem;
+      font-size: 0.86rem;
+    }
+    .actions .btn.primary-action {
+      flex: 1 1 100%;
     }
     .stats {
       font-size: 0.8rem;
@@ -632,8 +691,15 @@
     .push-actions {
       width: 100%;
     }
-    .push-actions button {
+    .push-actions .btn,
+    .push-actions button,
+    .push-actions a.btn {
       flex: 1 1 auto;
+      text-align: center;
+      justify-content: center;
+    }
+    .err {
+      word-break: break-word;
     }
     .add-actions {
       flex-direction: column;

@@ -635,7 +635,7 @@ async fn import_pack(
                 "some pack item sources missing; copying available files"
             );
         }
-        match copy_sources_into_library(&resolved, Path::new(&library_root), &relative).await {
+        match copy_sources_into_library(&resolved, Path::new(&library_root), &relative, false).await {
             Ok(dest) => {
                 sqlx::query(
                     r#"

@@ -305,15 +305,16 @@ pub async fn copy_completed(
     library_root: &Path,
     relative: &Path,
 ) -> AppResult<PathBuf> {
-    copy_sources_into_library(&[source.to_path_buf()], library_root, relative).await
+    copy_sources_into_library(&[source.to_path_buf()], library_root, relative, true).await
 }
 
 /// Copy one or more torrent paths into the same library book folder.
-/// Existing destination directory is merged (additional files allowed).
+/// When `overwrite` is true, an existing destination under the library root is replaced.
 pub async fn copy_sources_into_library(
     sources: &[PathBuf],
     library_root: &Path,
     relative: &Path,
+    overwrite: bool,
 ) -> AppResult<PathBuf> {
     if sources.is_empty() {
         return Err(AppError::Internal("No source paths to copy".into()));
@@ -329,6 +330,10 @@ pub async fn copy_sources_into_library(
 
     let destination = library_root.join(relative);
 
+    if overwrite && destination.exists() {
+        clear_destination_under_root(library_root, &destination).await?;
+    }
+
     // Single directory source: recursive copy into book folder (merge if exists).
     if sources.len() == 1 {
         let source = &sources[0];
@@ -337,7 +342,7 @@ pub async fn copy_sources_into_library(
             .map_err(|e| AppError::internal(e.to_string()))?;
         if meta.is_dir() {
             if destination.exists() {
-                merge_dir_recursive(source, &destination).await?;
+                merge_dir_recursive(source, &destination, overwrite).await?;
             } else {
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)
@@ -359,14 +364,14 @@ pub async fn copy_sources_into_library(
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
         if meta.is_dir() {
-            merge_dir_recursive(source, &destination).await?;
+            merge_dir_recursive(source, &destination, overwrite).await?;
             continue;
         }
         let file_name = source
             .file_name()
             .ok_or_else(|| AppError::Internal("Invalid source file".into()))?;
         let dest_file = destination.join(file_name);
-        if dest_file.exists() {
+        if dest_file.exists() && !overwrite {
             tracing::info!(
                 dest = %dest_file.display(),
                 "file already exists in book folder — skipping"
@@ -379,6 +384,38 @@ pub async fn copy_sources_into_library(
     }
 
     Ok(destination)
+}
+
+async fn clear_destination_under_root(library_root: &Path, destination: &Path) -> AppResult<()> {
+    let root = fs::canonicalize(library_root).await.map_err(|e| {
+        AppError::Internal(format!(
+            "Library path is not accessible ({}): {e}",
+            library_root.display()
+        ))
+    })?;
+    let dest = fs::canonicalize(destination)
+        .await
+        .map_err(|e| AppError::internal(format!("Cannot resolve destination path: {e}")))?;
+    if !dest.starts_with(&root) || dest == root {
+        return Err(AppError::Internal(format!(
+            "Refusing to overwrite path outside library root: {}",
+            dest.display()
+        )));
+    }
+    let meta = fs::metadata(&dest)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    if meta.is_dir() {
+        fs::remove_dir_all(&dest)
+            .await
+            .map_err(|e| AppError::internal(format!("Failed to clear library folder: {e}")))?;
+    } else {
+        fs::remove_file(&dest)
+            .await
+            .map_err(|e| AppError::internal(format!("Failed to clear library file: {e}")))?;
+    }
+    tracing::info!(dest = %dest.display(), "cleared library destination for overwrite");
+    Ok(())
 }
 
 /// Delete an imported book destination, but only if it lies under `library_root`.
@@ -441,7 +478,7 @@ pub async fn remove_library_destination(
     Ok(())
 }
 
-async fn merge_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
+async fn merge_dir_recursive(src: &Path, dst: &Path, overwrite: bool) -> AppResult<()> {
     fs::create_dir_all(dst)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
@@ -460,8 +497,8 @@ async fn merge_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if file_type.is_dir() {
-            Box::pin(merge_dir_recursive(&from, &to)).await?;
-        } else if to.exists() {
+            Box::pin(merge_dir_recursive(&from, &to, overwrite)).await?;
+        } else if to.exists() && !overwrite {
             tracing::info!(dest = %to.display(), "file already exists — skipping");
         } else {
             fs::copy(&from, &to)

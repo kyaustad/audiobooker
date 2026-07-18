@@ -209,6 +209,8 @@ export const api = {
     }),
   retryImport: (id: number) =>
     request<{ download: Download }>(`/downloads/${id}/retry-import`, { method: 'POST' }),
+  reimportDownload: (id: number) =>
+    request<{ download: Download }>(`/downloads/${id}/reimport`, { method: 'POST' }),
   refreshQbittorrent: (id: number) =>
     request<{
       ok: boolean

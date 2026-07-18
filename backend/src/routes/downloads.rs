@@ -599,6 +599,93 @@ pub async fn retry_import(
     })))
 }
 
+/// Re-copy an already-imported single book into the library, overwriting the destination.
+pub async fn reimport(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(AppError::Forbidden);
+    }
+    let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    if download.kind == "pack" {
+        return Err(AppError::BadRequest(
+            "Pack books use Un-import / remap on the Map pack page".into(),
+        ));
+    }
+    if download.status != "imported" {
+        return Err(AppError::BadRequest(
+            "Only imported singles can be re-imported".into(),
+        ));
+    }
+
+    let meta: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM book_metadata WHERE download_id = ? AND download_item_id IS NULL",
+    )
+    .bind(download.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if meta.is_none() {
+        return Err(AppError::BadRequest(
+            "Cannot re-import without Audible metadata".into(),
+        ));
+    }
+
+    if let Some(dest) = download
+        .destination_path
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let library_root = if let Some(lid) = download.library_id {
+            let library = sqlx::query_as::<_, Library>(
+                "SELECT id, name, path, abs_id, abs_path, created_at FROM libraries WHERE id = ?",
+            )
+            .bind(lid)
+            .fetch_optional(&state.pool)
+            .await?;
+            library.map(|l| l.path)
+        } else {
+            let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
+                .fetch_one(&state.pool)
+                .await?;
+            if settings.library_path.trim().is_empty() {
+                None
+            } else {
+                Some(settings.library_path)
+            }
+        };
+        if let Some(root) = library_root {
+            if !Library::path_needs_config(&root) {
+                remove_library_destination(Path::new(&root), dest).await?;
+            }
+        }
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE downloads SET
+            status = 'completed',
+            destination_path = NULL,
+            error_message = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?;
+
+    let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(download.id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(Json(json!({
+        "download": attach_metadata(&state.pool, download).await?
+    })))
+}
+
 /// Pull live save/content paths from qBittorrent and requeue path-related pack failures.
 /// Fixes existing installs stuck pointing at `/incomplete` after the torrent finished.
 pub async fn refresh_qbittorrent(

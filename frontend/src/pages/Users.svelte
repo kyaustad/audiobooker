@@ -321,4 +321,17 @@
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 0.65rem;
   }
+  @media (max-width: 640px) {
+    .user-row {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .user-actions {
+      width: 100%;
+    }
+    .user-actions button {
+      flex: 1 1 auto;
+      justify-content: center;
+    }
+  }
 </style>

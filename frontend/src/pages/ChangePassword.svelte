@@ -124,7 +124,7 @@
 </script>
 
 <div class="account stack">
-  <div class="card stack" style="max-width:520px">
+  <div class="card stack account-card">
     <div>
       <h2>Account</h2>
       <p class="muted">Password and notification preferences.</p>
@@ -141,7 +141,7 @@
     </form>
   </div>
 
-  <div class="card stack" style="max-width:520px">
+  <div class="card stack account-card">
     <div>
       <h3>Notifications</h3>
       <p class="muted">
@@ -187,7 +187,7 @@
           disabled={prefsBusy || !pushSubscribed}
           onchange={() => togglePref('notify_imported')}
         />
-        Book imported into library
+        <span>Book imported into library</span>
       </label>
       <label class="pref">
         <input
@@ -196,7 +196,7 @@
           disabled={prefsBusy || !pushSubscribed}
           onchange={() => togglePref('notify_pack_ready')}
         />
-        Pack ready to map
+        <span>Pack ready to map</span>
       </label>
       <label class="pref">
         <input
@@ -205,7 +205,7 @@
           disabled={prefsBusy || !pushSubscribed}
           onchange={() => togglePref('notify_download_finished')}
         />
-        Download finished (before import)
+        <span>Download finished (before import)</span>
       </label>
       <label class="pref">
         <input
@@ -214,7 +214,7 @@
           disabled={prefsBusy || !pushSubscribed}
           onchange={() => togglePref('notify_failures')}
         />
-        Failures
+        <span>Failures</span>
       </label>
     </div>
   </div>
@@ -223,6 +223,12 @@
 <style>
   .account {
     gap: 1rem;
+    width: 100%;
+    max-width: 520px;
+  }
+  .account-card {
+    width: 100%;
+    max-width: none;
   }
   .push-actions {
     display: flex;
@@ -231,16 +237,21 @@
   }
   .notify-prefs {
     display: grid;
-    gap: 0.45rem;
+    gap: 0.55rem;
   }
   .notify-prefs.dim {
     opacity: 0.55;
   }
   .pref {
     display: flex;
-    align-items: center;
-    gap: 0.5rem;
+    align-items: flex-start;
+    gap: 0.55rem;
     font-weight: 500;
+    line-height: 1.35;
+  }
+  .pref input {
+    margin-top: 0.15rem;
+    flex: 0 0 auto;
   }
   .install-banner {
     border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--border));
@@ -250,5 +261,12 @@
   }
   .install-banner p {
     margin: 0.35rem 0 0;
+  }
+  @media (max-width: 520px) {
+    .push-actions button {
+      flex: 1 1 auto;
+      justify-content: center;
+      text-align: center;
+    }
   }
 </style>

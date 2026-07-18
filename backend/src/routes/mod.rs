@@ -58,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/downloads/{id}/files", get(downloads::list_files))
         .route("/downloads/{id}/retry-imports", post(downloads::retry_pack_imports))
         .route("/downloads/{id}/retry-import", post(downloads::retry_import))
+        .route("/downloads/{id}/reimport", post(downloads::reimport))
         .route(
             "/downloads/{id}/refresh-qbittorrent",
             post(downloads::refresh_qbittorrent),
