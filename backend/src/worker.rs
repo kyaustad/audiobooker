@@ -17,6 +17,10 @@ use crate::qbittorrent::{QbittorrentClient, map_state};
 
 pub fn spawn_worker(pool: SqlitePool, qb: QbittorrentClient) {
     tokio::spawn(async move {
+        if let Err(err) = recover_stale_copies(&pool).await {
+            tracing::warn!(error = %err, "stale copy recovery failed");
+        }
+
         loop {
             let interval_ms = match sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
                 .fetch_one(&pool)
@@ -37,6 +41,69 @@ pub fn spawn_worker(pool: SqlitePool, qb: QbittorrentClient) {
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
         }
     });
+}
+
+const INTERRUPTED_MSG: &str = "Import interrupted (server restarted). Retry to finish.";
+
+/// Rows left in `copying` after a crash/restart are never resumed by the worker.
+/// Reset them so users (and the next import tick) can finish the copy.
+async fn recover_stale_copies(pool: &SqlitePool) -> anyhow::Result<()> {
+    let items = sqlx::query(
+        r#"
+        UPDATE download_items SET
+            status = 'error',
+            error_message = ?,
+            updated_at = datetime('now')
+        WHERE status = 'copying'
+        "#,
+    )
+    .bind(INTERRUPTED_MSG)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    let downloads = sqlx::query(
+        r#"
+        UPDATE downloads SET
+            status = 'error',
+            error_message = ?,
+            updated_at = datetime('now')
+        WHERE status = 'copying'
+        "#,
+    )
+    .bind(INTERRUPTED_MSG)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    // Packs whose items were mid-copy should be eligible for import again.
+    let packs = sqlx::query(
+        r#"
+        UPDATE downloads SET
+            status = 'completed',
+            error_message = NULL,
+            updated_at = datetime('now')
+        WHERE kind = 'pack'
+          AND status IN ('copying', 'partial', 'imported', 'error', 'awaiting_map')
+          AND EXISTS (
+            SELECT 1 FROM download_items
+            WHERE download_id = downloads.id AND status IN ('ready', 'error')
+          )
+        "#,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    if items > 0 || downloads > 0 || packs > 0 {
+        tracing::info!(
+            items,
+            downloads,
+            packs_requeued = packs,
+            "recovered stale copying state after restart"
+        );
+    }
+    Ok(())
 }
 
 async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<()> {

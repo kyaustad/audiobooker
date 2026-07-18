@@ -21,6 +21,7 @@
   let tab = $state<Tab>('all')
   let removingId = $state<number | null>(null)
   let refreshingId = $state<number | null>(null)
+  let retryingId = $state<number | null>(null)
   let timer: number | undefined
 
   const SEEDING_STATUSES = new Set(['completed', 'copying', 'imported', 'awaiting_map', 'partial'])
@@ -60,11 +61,19 @@
     return isPack(d) && d.status !== 'awaiting_match'
   }
 
+  /** Single-book stuck copy or failed import after metadata match. */
+  function showRetryImport(d: Download) {
+    if (isPack(d)) return false
+    if (d.status === 'copying') return true
+    return d.status === 'error' && Boolean(d.metadata)
+  }
+
   function hasActions(d: Download) {
     return (
       d.status === 'awaiting_match' ||
       showMap(d) ||
       showRefreshQbit(d) ||
+      showRetryImport(d) ||
       canRemove(d)
     )
   }
@@ -174,6 +183,27 @@
       showToast(err instanceof Error ? err.message : 'qBit refresh failed')
     } finally {
       refreshingId = null
+    }
+  }
+
+  async function retryImport(d: Download) {
+    if (
+      d.status === 'copying' &&
+      !window.confirm(
+        'Retry this import?\n\nOnly use if the copy looks stuck (for example after a restart).',
+      )
+    ) {
+      return
+    }
+    retryingId = d.id
+    try {
+      await api.retryImport(d.id)
+      showToast('Import queued again')
+      await refresh()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Retry failed')
+    } finally {
+      retryingId = null
     }
   }
 
@@ -334,6 +364,16 @@
                 <a class="btn" href={`#/map/${d.id}`}>
                   {d.status === 'imported' || d.status === 'partial' ? 'Map more' : 'Map'}
                 </a>
+              {/if}
+              {#if showRetryImport(d)}
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={retryingId === d.id}
+                  onclick={() => retryImport(d)}
+                >
+                  {retryingId === d.id ? '…' : d.status === 'copying' ? 'Reset stuck copy' : 'Retry import'}
+                </button>
               {/if}
               {#if showRefreshQbit(d)}
                 <button

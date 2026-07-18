@@ -511,7 +511,7 @@ pub async fn retry_pack_imports(
             status = 'ready',
             error_message = NULL,
             updated_at = datetime('now')
-        WHERE download_id = ? AND status = 'error'
+        WHERE download_id = ? AND status IN ('error', 'copying')
         "#,
     )
     .bind(download.id)
@@ -520,7 +520,9 @@ pub async fn retry_pack_imports(
     .rows_affected();
 
     if updated == 0 {
-        return Err(AppError::BadRequest("No failed imports to retry".into()));
+        return Err(AppError::BadRequest(
+            "No failed or stuck imports to retry".into(),
+        ));
     }
 
     sqlx::query(
@@ -537,6 +539,62 @@ pub async fn retry_pack_imports(
 
     Ok(Json(json!({
         "retried": updated,
+        "download": attach_metadata(&state.pool, download).await?
+    })))
+}
+
+/// Re-queue a single-book import after a stuck `copying` or failed import.
+pub async fn retry_import(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(AppError::Forbidden);
+    }
+    let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    if download.kind == "pack" {
+        return Err(AppError::BadRequest(
+            "Use pack retry-imports for pack downloads".into(),
+        ));
+    }
+    if !matches!(download.status.as_str(), "copying" | "error") {
+        return Err(AppError::BadRequest(
+            "Only stuck or failed imports can be retried".into(),
+        ));
+    }
+
+    let meta: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM book_metadata WHERE download_id = ? AND download_item_id IS NULL",
+    )
+    .bind(download.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if meta.is_none() {
+        return Err(AppError::BadRequest(
+            "Cannot retry import without Audible metadata".into(),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE downloads SET
+            status = 'completed',
+            error_message = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?;
+
+    let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(download.id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(Json(json!({
         "download": attach_metadata(&state.pool, download).await?
     })))
 }

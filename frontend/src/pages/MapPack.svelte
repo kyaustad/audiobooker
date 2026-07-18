@@ -45,6 +45,10 @@
   const failedCount = $derived(
     (download?.items || []).filter((i) => i.status === 'error').length,
   )
+  const copyingCount = $derived(
+    (download?.items || []).filter((i) => i.status === 'copying').length,
+  )
+  const retryableCount = $derived(failedCount + copyingCount)
   const tree = $derived(buildTree(files))
   const selectionCount = $derived(selectedPaths.size)
 
@@ -301,12 +305,23 @@
     try {
       const data = await api.retryPackImports(Number(params.id))
       download = data.download
-      showToast(`Retrying ${data.retried} failed import${data.retried === 1 ? '' : 's'}`)
+      showToast(`Retrying ${data.retried} import${data.retried === 1 ? '' : 's'}`)
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Retry failed')
     } finally {
       retrying = false
     }
+  }
+
+  async function resetStuckCopy() {
+    if (
+      !window.confirm(
+        'Reset stuck copies?\n\nOnly use this if an import looks frozen (for example after a container restart). Live copies that are still running will be interrupted.',
+      )
+    ) {
+      return
+    }
+    await retryFailed()
   }
 
   async function refreshFromQbit() {
@@ -373,9 +388,18 @@
         <button class="secondary" type="button" disabled={refreshingQbit} onclick={refreshFromQbit}>
           {refreshingQbit ? 'Refreshing…' : 'Refresh from qBit'}
         </button>
-        {#if failedCount > 0}
-          <button class="secondary" type="button" disabled={retrying} onclick={retryFailed}>
-            {retrying ? 'Retrying…' : `Retry ${failedCount} failed`}
+        {#if retryableCount > 0}
+          <button
+            class="secondary"
+            type="button"
+            disabled={retrying}
+            onclick={() => (copyingCount > 0 ? resetStuckCopy() : retryFailed())}
+          >
+            {retrying
+              ? 'Retrying…'
+              : copyingCount > 0 && failedCount === 0
+                ? `Reset ${copyingCount} stuck`
+                : `Retry ${retryableCount} stuck/failed`}
           </button>
         {/if}
         <a class="btn secondary" href="#/">Back to queue</a>
@@ -406,14 +430,23 @@
       {/if}
 
       <h3>Mapped ({download.items?.length || 0})</h3>
+      {#if copyingCount > 0}
+        <p class="muted tiny">
+          Import in progress — if this persists after a restart, use Reset stuck copy.
+        </p>
+      {/if}
       {#if !download.items?.length}
         <p class="muted">Nothing mapped yet — select a folder or file above.</p>
       {:else}
         <div class="mapped-list">
           {#each download.items as item}
             {@const paths = item.source_paths?.length ? item.source_paths : [item.source_path]}
-            <div class="mapped-row" class:failed={item.status === 'error'}>
-              <div>
+            <div
+              class="mapped-row"
+              class:failed={item.status === 'error'}
+              class:copying={item.status === 'copying'}
+            >
+              <div class="mapped-meta-block">
                 <strong>{item.metadata?.title || paths[0]}</strong>
                 {#each paths as p}
                   <div class="muted path-line">{p}</div>
@@ -423,17 +456,23 @@
                   <div class="err">{item.error_message}</div>
                 {/if}
               </div>
-              {#if item.status === 'imported'}
-                <button
-                  class="danger"
-                  type="button"
-                  onclick={() => unimport(item.id, item.metadata?.title || paths[0])}
-                >
-                  Un-import
-                </button>
-              {:else if item.status !== 'copying'}
-                <button class="danger" type="button" onclick={() => unmap(item.id)}>Unmap</button>
-              {/if}
+              <div class="mapped-actions">
+                {#if item.status === 'imported'}
+                  <button
+                    class="danger"
+                    type="button"
+                    onclick={() => unimport(item.id, item.metadata?.title || paths[0])}
+                  >
+                    Un-import
+                  </button>
+                {:else if item.status === 'copying'}
+                  <button class="secondary" type="button" disabled={retrying} onclick={resetStuckCopy}>
+                    Reset stuck copy
+                  </button>
+                {:else}
+                  <button class="danger" type="button" onclick={() => unmap(item.id)}>Unmap</button>
+                {/if}
+              </div>
             </div>
           {/each}
         </div>
@@ -746,9 +785,9 @@
   }
   .mapped-row {
     display: flex;
-    justify-content: space-between;
-    gap: 0.75rem;
-    align-items: start;
+    flex-direction: column;
+    gap: 0.65rem;
+    align-items: stretch;
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 0.65rem 0.75rem;
@@ -756,6 +795,29 @@
   }
   .mapped-row.failed {
     border-color: color-mix(in oklab, var(--danger) 45%, var(--border));
+  }
+  .mapped-row.copying {
+    border-color: color-mix(in oklab, var(--accent) 35%, var(--border));
+  }
+  .mapped-meta-block {
+    min-width: 0;
+  }
+  .mapped-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    width: 100%;
+  }
+  .mapped-actions button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  @media (max-width: 520px) {
+    .mapped-actions button {
+      flex: 1 1 auto;
+      justify-content: center;
+    }
   }
   .path-line {
     font-family: var(--mono);

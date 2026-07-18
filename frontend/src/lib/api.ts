@@ -207,6 +207,8 @@ export const api = {
     request<{ retried: number; download: Download }>(`/downloads/${id}/retry-imports`, {
       method: 'POST',
     }),
+  retryImport: (id: number) =>
+    request<{ download: Download }>(`/downloads/${id}/retry-import`, { method: 'POST' }),
   refreshQbittorrent: (id: number) =>
     request<{
       ok: boolean
