@@ -4,10 +4,11 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::Path;
 
 use crate::auth::AuthSession;
 use crate::error::{AppError, AppResult};
-use crate::files::{entries_from_disk, entries_from_qb_paths, resolve_download_source};
+use crate::files::{entries_from_disk, entries_from_qb_paths, remove_library_destination, resolve_download_source};
 use crate::limits::{check_active_torrent_limit, check_request_limit};
 use crate::magnet::parse_download_input;
 use crate::metadata::MetadataMatch;
@@ -956,6 +957,112 @@ pub async fn unmap_item(
         "queued" | "downloading" | "completed"
     ) {
         download.status.as_str()
+    } else {
+        "awaiting_map"
+    };
+    sqlx::query(
+        "UPDATE downloads SET status = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(new_status)
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?;
+
+    let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(download.id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(Json(json!({
+        "download": attach_metadata(&state.pool, download).await?
+    })))
+}
+
+/// Delete the library copy of an imported pack item and clear its mapping so paths can be remapped.
+pub async fn unimport_item(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath((id, item_id)): AxumPath<(i64, i64)>,
+) -> AppResult<Json<Value>> {
+    if auth.user.is_root() {
+        return Err(AppError::Forbidden);
+    }
+    let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    if download.kind != "pack" {
+        return Err(AppError::BadRequest(
+            "Only pack downloads support un-import".into(),
+        ));
+    }
+    let item = sqlx::query_as::<_, DownloadItem>(
+        "SELECT * FROM download_items WHERE id = ? AND download_id = ?",
+    )
+    .bind(item_id)
+    .bind(download.id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    if item.status == "copying" {
+        return Err(AppError::BadRequest(
+            "Cannot un-import while a copy is in progress".into(),
+        ));
+    }
+    if item.status != "imported" {
+        return Err(AppError::BadRequest(
+            "Only imported pack items can be un-imported".into(),
+        ));
+    }
+
+    let library = sqlx::query_as::<_, Library>(
+        "SELECT id, name, path, abs_id, abs_path, created_at FROM libraries WHERE id = ?",
+    )
+    .bind(item.library_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Library for this item no longer exists".into()))?;
+
+    if Library::path_needs_config(&library.path) {
+        return Err(AppError::BadRequest(
+            "Library has no container path set; cannot safely delete the imported copy".into(),
+        ));
+    }
+
+    if let Some(dest) = item.destination_path.as_deref().filter(|s| !s.trim().is_empty()) {
+        remove_library_destination(Path::new(&library.path), dest).await?;
+    }
+
+    sqlx::query("DELETE FROM book_metadata WHERE download_item_id = ?")
+        .bind(item.id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM download_items WHERE id = ?")
+        .bind(item.id)
+        .execute(&state.pool)
+        .await?;
+
+    let remaining: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM download_items WHERE download_id = ? AND status != 'imported'",
+    )
+    .bind(download.id)
+    .fetch_one(&state.pool)
+    .await?;
+    let imported: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM download_items WHERE download_id = ? AND status = 'imported'",
+    )
+    .bind(download.id)
+    .fetch_one(&state.pool)
+    .await?;
+    let new_status = if imported.0 > 0 && remaining.0 > 0 {
+        "partial"
+    } else if imported.0 > 0 {
+        "imported"
+    } else if matches!(
+        download.status.as_str(),
+        "queued" | "downloading" | "completed"
+    ) {
+        download.status.as_str()
+    } else if remaining.0 > 0 {
+        "partial"
     } else {
         "awaiting_map"
     };

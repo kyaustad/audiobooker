@@ -278,6 +278,24 @@
     }
   }
 
+  async function unimport(itemId: number, title: string) {
+    const label = title || 'this book'
+    if (
+      !window.confirm(
+        `Un-import “${label}”?\n\nThis deletes the copy from your library folder and clears the mapping so you can remap those files.`,
+      )
+    ) {
+      return
+    }
+    try {
+      const data = await api.unimportDownloadItem(Number(params.id), itemId)
+      download = data.download
+      showToast('Un-imported — paths are free to remap')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not un-import')
+    }
+  }
+
   async function retryFailed() {
     retrying = true
     try {
@@ -405,7 +423,15 @@
                   <div class="err">{item.error_message}</div>
                 {/if}
               </div>
-              {#if item.status !== 'imported' && item.status !== 'copying'}
+              {#if item.status === 'imported'}
+                <button
+                  class="danger"
+                  type="button"
+                  onclick={() => unimport(item.id, item.metadata?.title || paths[0])}
+                >
+                  Un-import
+                </button>
+              {:else if item.status !== 'copying'}
                 <button class="danger" type="button" onclick={() => unmap(item.id)}>Unmap</button>
               {/if}
             </div>

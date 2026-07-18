@@ -66,6 +66,10 @@ pub fn router(state: AppState) -> Router {
             "/downloads/{id}/items/{item_id}",
             delete(downloads::unmap_item),
         )
+        .route(
+            "/downloads/{id}/items/{item_id}/unimport",
+            post(downloads::unimport_item),
+        )
         .route("/metadata/search", get(metadata::search))
         .route("/metadata/asin/{asin}", get(metadata::by_asin))
         .route("/push/vapid", get(push::vapid_public))

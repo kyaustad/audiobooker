@@ -233,6 +233,10 @@ export const api = {
     }),
   unmapDownloadItem: (id: number, itemId: number) =>
     request<{ download: Download }>(`/downloads/${id}/items/${itemId}`, { method: 'DELETE' }),
+  unimportDownloadItem: (id: number, itemId: number) =>
+    request<{ download: Download }>(`/downloads/${id}/items/${itemId}/unimport`, {
+      method: 'POST',
+    }),
   searchMetadata: (title: string, author?: string) => {
     const q = new URLSearchParams({ title })
     if (author) q.set('author', author)

@@ -381,6 +381,66 @@ pub async fn copy_sources_into_library(
     Ok(destination)
 }
 
+/// Delete an imported book destination, but only if it lies under `library_root`.
+/// Missing paths are treated as success (already gone).
+pub async fn remove_library_destination(
+    library_root: &Path,
+    destination_path: &str,
+) -> AppResult<()> {
+    let dest_raw = destination_path.trim();
+    if dest_raw.is_empty() {
+        return Ok(());
+    }
+
+    let root = fs::canonicalize(library_root).await.map_err(|e| {
+        AppError::BadRequest(format!(
+            "Library path is not accessible ({}): {e}",
+            library_root.display()
+        ))
+    })?;
+
+    let dest = PathBuf::from(dest_raw);
+    let dest = if dest.exists() {
+        fs::canonicalize(&dest)
+            .await
+            .map_err(|e| AppError::internal(format!("Cannot resolve destination path: {e}")))?
+    } else {
+        // Path already gone — nothing to delete.
+        return Ok(());
+    };
+
+    if !dest.starts_with(&root) {
+        return Err(AppError::BadRequest(format!(
+            "Refusing to delete path outside library root: {}",
+            dest.display()
+        )));
+    }
+    if dest == root {
+        return Err(AppError::BadRequest(
+            "Refusing to delete the library root itself".into(),
+        ));
+    }
+
+    let meta = fs::metadata(&dest)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    if meta.is_dir() {
+        fs::remove_dir_all(&dest)
+            .await
+            .map_err(|e| AppError::internal(format!("Failed to remove library folder: {e}")))?;
+    } else {
+        fs::remove_file(&dest)
+            .await
+            .map_err(|e| AppError::internal(format!("Failed to remove library file: {e}")))?;
+    }
+    tracing::info!(
+        dest = %dest.display(),
+        root = %root.display(),
+        "removed unimported library destination"
+    );
+    Ok(())
+}
+
 async fn merge_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
     fs::create_dir_all(dst)
         .await
