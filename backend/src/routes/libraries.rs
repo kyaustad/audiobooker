@@ -179,10 +179,42 @@ pub async fn delete(
             "At least one library must remain".into(),
         ));
     }
-    sqlx::query("DELETE FROM libraries WHERE id = ?")
+
+    let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM libraries WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    // Pack items require a library_id (NOT NULL) — refuse until remapped/removed.
+    let pack_items: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM download_items WHERE library_id = ?")
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await?;
+    if pack_items.0 > 0 {
+        return Err(AppError::BadRequest(format!(
+            "Cannot delete this library: {} pack book(s) still import into it. Unmap those items or delete the related pack downloads first.",
+            pack_items.0
+        )));
+    }
+
+    // Singles store a nullable library_id — clear so the FK does not block.
+    sqlx::query("UPDATE downloads SET library_id = NULL WHERE library_id = ?")
         .bind(id)
         .execute(&state.pool)
         .await?;
+
+    // user_libraries cascades via ON DELETE CASCADE.
+    let result = sqlx::query("DELETE FROM libraries WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

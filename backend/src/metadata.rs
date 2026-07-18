@@ -120,10 +120,7 @@ impl MetadataClient {
             .collect::<Vec<_>>();
 
         if matches.is_empty() {
-            return Err(AppError::Internal(
-                "No Audible matches found. Try a different title, add an author, or paste an ASIN."
-                    .into(),
-            ));
+            return Ok(Vec::new());
         }
 
         Ok(matches)
