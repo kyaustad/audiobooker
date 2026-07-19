@@ -159,7 +159,7 @@
     filesSource = fileData.source
     contentPath = fileData.content_path ?? null
     if (libraries.length === 1) libraryId = libraries[0].id
-    if (download.kind !== 'pack') {
+    if (download.kind !== 'pack' && !download.map_files) {
       push(`/match/${id}`)
       return
     }
@@ -365,12 +365,12 @@
 </script>
 
 {#if loading || !download}
-  <div class="card muted">Loading pack map…</div>
+  <div class="card muted">Loading file map…</div>
 {:else}
   <div class="card stack">
     <div class="header-row">
       <div>
-        <h2>Map pack books</h2>
+        <h2>Map files to Audible</h2>
         <p class="muted">
           {download.name || 'Pack torrent'} ·
           <span class="badge {download.status}">{download.status.replaceAll('_', ' ')}</span>

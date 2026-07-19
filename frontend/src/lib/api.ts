@@ -9,6 +9,8 @@ export type User = {
   rate_limit_requests?: number | null
   rate_limit_window_secs?: number | null
   rate_limit_active_torrents?: number | null
+  can_remove?: boolean
+  can_remove_files?: boolean
 }
 
 export type NotificationPrefs = {
@@ -60,6 +62,8 @@ export type Download = {
   error_message: string | null
   library_id?: number | null
   kind?: string
+  map_files?: boolean
+  username?: string
   metadata?: {
     asin: string
     title: string
@@ -121,10 +125,15 @@ export const api = {
       body: JSON.stringify({ current_password, new_password }),
     }),
   listUsers: () => request<{ users: User[] }>('/users'),
-  createUser: (username: string, password: string, library_ids?: number[]) =>
+  createUser: (
+    username: string,
+    password: string,
+    library_ids?: number[],
+    opts?: { role?: string; can_remove?: boolean; can_remove_files?: boolean },
+  ) =>
     request('/users', {
       method: 'POST',
-      body: JSON.stringify({ username, password, library_ids }),
+      body: JSON.stringify({ username, password, library_ids, ...opts }),
     }),
   updateUser: (
     id: number,
@@ -132,6 +141,9 @@ export const api = {
       password?: string
       library_ids?: number[]
       must_change_password?: boolean
+      role?: string
+      can_remove?: boolean
+      can_remove_files?: boolean
       rate_limit_requests?: number | null
       rate_limit_window_secs?: number | null
       rate_limit_active_torrents?: number | null
@@ -182,20 +194,38 @@ export const api = {
   rotateApiKey: () =>
     request<{ api_key: string; warning: string }>('/api-key', { method: 'POST' }),
   listDownloads: () => request<{ downloads: Download[] }>('/downloads'),
+  listPendingDownloads: () => request<{ downloads: Download[] }>('/downloads/pending'),
   getDownload: (id: number) => request<{ download: Download }>(`/downloads/${id}`),
   createDownload: (input: string, name?: string, kind?: 'single' | 'pack') =>
     request<{ download: Download }>('/downloads', {
       method: 'POST',
       body: JSON.stringify({ input, name, kind }),
     }),
-  deleteDownload: (id: number) => request(`/downloads/${id}`, { method: 'DELETE' }),
-  matchDownload: (id: number, match_data: unknown, library_id?: number) =>
-    request(`/downloads/${id}/match`, {
+  deleteDownload: (id: number, deleteFiles = false) =>
+    request(`/downloads/${id}?delete_files=${deleteFiles ? 'true' : 'false'}`, {
+      method: 'DELETE',
+    }),
+  matchDownload: (
+    id: number,
+    match_data: unknown,
+    library_id?: number,
+    map_files = false,
+  ) =>
+    request<{ download: Download; pending_approval?: boolean }>(`/downloads/${id}/match`, {
       method: 'POST',
-      body: JSON.stringify({ match_data, library_id }),
+      body: JSON.stringify({ match_data, library_id, map_files }),
+    }),
+  approveDownload: (id: number) =>
+    request<{ download: Download }>(`/downloads/${id}/approve`, { method: 'POST' }),
+  rejectDownload: (id: number, reason?: string) =>
+    request<{ download: Download }>(`/downloads/${id}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
     }),
   startPack: (id: number) =>
-    request<{ download: Download }>(`/downloads/${id}/start-pack`, { method: 'POST' }),
+    request<{ download: Download; pending_approval?: boolean }>(`/downloads/${id}/start-pack`, {
+      method: 'POST',
+    }),
   downloadFiles: (id: number) =>
     request<{
       files: ContentEntry[]
@@ -211,6 +241,8 @@ export const api = {
     request<{ download: Download }>(`/downloads/${id}/retry-import`, { method: 'POST' }),
   reimportDownload: (id: number) =>
     request<{ download: Download }>(`/downloads/${id}/reimport`, { method: 'POST' }),
+  unimportDownload: (id: number) =>
+    request<{ download: Download }>(`/downloads/${id}/unimport`, { method: 'POST' }),
   refreshQbittorrent: (id: number) =>
     request<{
       ok: boolean

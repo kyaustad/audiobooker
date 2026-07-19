@@ -109,12 +109,17 @@ impl QbittorrentClient {
         password: &str,
         magnet: &str,
         category: Option<&str>,
+        tags: Option<&str>,
     ) -> AppResult<()> {
         let cookie = self.login_cookie(base, username, password).await?;
         let url = format!("{}/api/v2/torrents/add", base.trim_end_matches('/'));
         let mut form = vec![("urls", magnet.to_string())];
         if let Some(cat) = category {
             form.push(("category", cat.to_string()));
+        }
+        // Comma-separated; tags that do not exist are created automatically.
+        if let Some(tag) = tags.map(str::trim).filter(|t| !t.is_empty()) {
+            form.push(("tags", tag.to_string()));
         }
         let resp = self
             .http

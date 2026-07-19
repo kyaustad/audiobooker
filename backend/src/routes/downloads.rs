@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,6 +30,21 @@ pub struct CreateDownloadRequest {
 pub struct MatchRequest {
     pub match_data: MetadataMatch,
     pub library_id: Option<i64>,
+    /// Download first, then map specific files (single books).
+    #[serde(default)]
+    pub map_files: bool,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteDownloadQuery {
+    /// Delete torrent data on disk (requires can_remove_files).
+    #[serde(default)]
+    pub delete_files: bool,
+}
+
+#[derive(Deserialize)]
+pub struct RejectRequest {
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -100,7 +115,7 @@ async fn attach_metadata(
     .fetch_optional(pool)
     .await?;
 
-    let items = if download.kind == "pack" {
+    let items = if download.uses_file_mapping() {
         let rows = sqlx::query_as::<_, DownloadItem>(
             "SELECT * FROM download_items WHERE download_id = ? ORDER BY source_path",
         )
@@ -145,6 +160,96 @@ async fn load_user_download(
         .fetch_optional(pool)
         .await?
         .ok_or(AppError::NotFound)
+}
+
+async fn load_download(pool: &sqlx::SqlitePool, id: i64) -> AppResult<Download> {
+    sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+async fn add_magnet_queued(
+    state: &AppState,
+    settings: &Settings,
+    download: &Download,
+    kind: &str,
+    map_files: bool,
+    name: Option<&str>,
+    library_id: Option<i64>,
+) -> AppResult<Download> {
+    if settings.qbittorrent_url.is_empty() {
+        return Err(AppError::BadRequest(
+            "qBittorrent is not configured. Ask an administrator to finish setup.".into(),
+        ));
+    }
+
+    // Tag with the Audiobooker username (separate from the audiobooks category).
+    let owner_tag: String = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
+        .bind(download.user_id)
+        .fetch_optional(&state.pool)
+        .await?
+        .unwrap_or_default();
+    let owner_tag = sanitize_qb_tag(&owner_tag);
+
+    state
+        .qb
+        .add_magnet(
+            &settings.qbittorrent_url,
+            &settings.qbittorrent_username,
+            &settings.qbittorrent_password,
+            &download.magnet_uri,
+            Some("audiobooks"),
+            if owner_tag.is_empty() {
+                None
+            } else {
+                Some(owner_tag.as_str())
+            },
+        )
+        .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE downloads SET
+            status = 'queued',
+            kind = ?,
+            map_files = ?,
+            name = COALESCE(?, name),
+            library_id = COALESCE(?, library_id),
+            error_message = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(kind)
+    .bind(map_files)
+    .bind(name)
+    .bind(library_id)
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?;
+
+    sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(download.id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(Into::into)
+}
+
+/// qBittorrent tags are comma-separated; strip separators and control chars.
+fn sanitize_qb_tag(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c == ',' || c.is_control() || c.is_whitespace() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 async fn resolve_library_id(
@@ -329,27 +434,17 @@ pub async fn create(
 }
 
 /// Start a pack torrent in qBittorrent without Audible matching.
+/// Requesters submit for approval instead of starting qBit.
 pub async fn start_pack(
     State(state): State<AppState>,
     auth: AuthSession,
     AxumPath(id): AxumPath<i64>,
 ) -> AppResult<Json<Value>> {
-    if auth.user.is_root() {
-        return Err(AppError::Forbidden);
-    }
+    auth.require_operator()?;
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
     if download.status != "awaiting_match" {
         return Err(AppError::BadRequest(
             "Pack download already started".into(),
-        ));
-    }
-
-    let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
-        .fetch_one(&state.pool)
-        .await?;
-    if settings.qbittorrent_url.is_empty() {
-        return Err(AppError::BadRequest(
-            "qBittorrent is not configured. Ask an administrator to finish setup.".into(),
         ));
     }
 
@@ -366,37 +461,41 @@ pub async fn start_pack(
         ));
     }
 
-    check_active_torrent_limit(&state.pool, auth.user.id).await?;
-
-    sqlx::query(
-        "UPDATE downloads SET kind = 'pack', updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(download.id)
-    .execute(&state.pool)
-    .await?;
-
-    state
-        .qb
-        .add_magnet(
-            &settings.qbittorrent_url,
-            &settings.qbittorrent_username,
-            &settings.qbittorrent_password,
-            &download.magnet_uri,
-            Some("audiobooks"),
+    if auth.user.is_requester() {
+        sqlx::query(
+            "UPDATE downloads SET kind = 'pack', status = 'pending_approval', error_message = NULL, updated_at = datetime('now') WHERE id = ?",
         )
+        .bind(download.id)
+        .execute(&state.pool)
         .await?;
 
-    sqlx::query(
-        "UPDATE downloads SET status = 'queued', kind = 'pack', updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(download.id)
-    .execute(&state.pool)
-    .await?;
+        let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+            .bind(download.id)
+            .fetch_one(&state.pool)
+            .await?;
 
-    let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
-        .bind(download.id)
+        return Ok(Json(json!({
+            "download": attach_metadata(&state.pool, download).await?,
+            "pending_approval": true,
+        })));
+    }
+
+    let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
         .fetch_one(&state.pool)
         .await?;
+
+    check_active_torrent_limit(&state.pool, auth.user.id).await?;
+
+    let download = add_magnet_queued(
+        &state,
+        &settings,
+        &download,
+        "pack",
+        false,
+        None,
+        None,
+    )
+    .await?;
 
     Ok(Json(json!({
         "download": attach_metadata(&state.pool, download).await?
@@ -449,7 +548,10 @@ pub async fn list_files(
     let mut source = "none";
 
     if !settings.qbittorrent_url.is_empty()
-        && !matches!(download.status.as_str(), "awaiting_match")
+        && !matches!(
+            download.status.as_str(),
+            "awaiting_match" | "pending_approval" | "rejected"
+        )
     {
         if let Ok(files) = state
             .qb
@@ -501,8 +603,8 @@ pub async fn retry_pack_imports(
         return Err(AppError::Forbidden);
     }
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
-    if download.kind != "pack" {
-        return Err(AppError::BadRequest("Only pack downloads support retry".into()));
+    if !download.uses_file_mapping() {
+        return Err(AppError::BadRequest("Only mapped downloads support retry".into()));
     }
 
     let updated = sqlx::query(
@@ -553,9 +655,9 @@ pub async fn retry_import(
         return Err(AppError::Forbidden);
     }
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
-    if download.kind == "pack" {
+    if download.uses_file_mapping() {
         return Err(AppError::BadRequest(
-            "Use pack retry-imports for pack downloads".into(),
+            "Use pack retry-imports for mapped downloads".into(),
         ));
     }
     if !matches!(download.status.as_str(), "copying" | "error") {
@@ -609,9 +711,9 @@ pub async fn reimport(
         return Err(AppError::Forbidden);
     }
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
-    if download.kind == "pack" {
+    if download.uses_file_mapping() {
         return Err(AppError::BadRequest(
-            "Pack books use Un-import / remap on the Map pack page".into(),
+            "Mapped books use Un-import / remap on the Map page".into(),
         ));
     }
     if download.status != "imported" {
@@ -767,7 +869,7 @@ async fn apply_qbittorrent_refresh(
         "awaiting_match" | "imported" | "copying"
     ) {
         download.status.clone()
-    } else if download.kind == "pack"
+    } else if download.uses_file_mapping()
         && torrent_completed
         && matches!(
             download.status.as_str(),
@@ -823,7 +925,7 @@ async fn apply_qbittorrent_refresh(
     .await?;
 
     let mut requeued_items = 0u64;
-    if download.kind == "pack" {
+    if download.uses_file_mapping() {
         if torrent_completed {
             let pending = sqlx::query(
                 "UPDATE download_items SET status = 'ready', updated_at = datetime('now') WHERE download_id = ? AND status = 'pending'",
@@ -894,18 +996,19 @@ pub async fn map_item(
     AxumPath(id): AxumPath<i64>,
     Json(body): Json<MapItemRequest>,
 ) -> AppResult<Json<Value>> {
-    if auth.user.is_root() {
-        return Err(AppError::Forbidden);
-    }
+    auth.require_can_start_downloads()?;
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
-    if download.kind != "pack" {
+    if !download.uses_file_mapping() {
         return Err(AppError::BadRequest(
-            "Only pack downloads support file mapping".into(),
+            "This download does not support file mapping".into(),
         ));
     }
-    if download.status == "awaiting_match" {
+    if matches!(
+        download.status.as_str(),
+        "awaiting_match" | "pending_approval" | "rejected"
+    ) {
         return Err(AppError::BadRequest(
-            "Start the pack download before mapping books".into(),
+            "Start the download before mapping books".into(),
         ));
     }
 
@@ -1053,10 +1156,13 @@ pub async fn unmap_item(
     auth: AuthSession,
     AxumPath((id, item_id)): AxumPath<(i64, i64)>,
 ) -> AppResult<Json<Value>> {
-    if auth.user.is_root() {
-        return Err(AppError::Forbidden);
-    }
+    auth.require_can_start_downloads()?;
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    if !download.uses_file_mapping() {
+        return Err(AppError::BadRequest(
+            "This download does not support file mapping".into(),
+        ));
+    }
     let item = sqlx::query_as::<_, DownloadItem>(
         "SELECT * FROM download_items WHERE id = ? AND download_id = ?",
     )
@@ -1123,19 +1229,17 @@ pub async fn unmap_item(
     })))
 }
 
-/// Delete the library copy of an imported pack item and clear its mapping so paths can be remapped.
+/// Delete the library copy of an imported mapped item and clear its mapping so paths can be remapped.
 pub async fn unimport_item(
     State(state): State<AppState>,
     auth: AuthSession,
     AxumPath((id, item_id)): AxumPath<(i64, i64)>,
 ) -> AppResult<Json<Value>> {
-    if auth.user.is_root() {
-        return Err(AppError::Forbidden);
-    }
+    auth.require_can_start_downloads()?;
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
-    if download.kind != "pack" {
+    if !download.uses_file_mapping() {
         return Err(AppError::BadRequest(
-            "Only pack downloads support un-import".into(),
+            "Only mapped downloads support un-import".into(),
         ));
     }
     let item = sqlx::query_as::<_, DownloadItem>(
@@ -1235,9 +1339,7 @@ pub async fn match_metadata(
     AxumPath(id): AxumPath<i64>,
     Json(body): Json<MatchRequest>,
 ) -> AppResult<Json<Value>> {
-    if auth.user.is_root() {
-        return Err(AppError::Forbidden);
-    }
+    auth.require_operator()?;
 
     let download = load_user_download(&state.pool, auth.user.id, id).await?;
     if download.kind == "pack" {
@@ -1245,23 +1347,24 @@ pub async fn match_metadata(
             "This is a pack download. Use map to assign Audible matches per folder.".into(),
         ));
     }
+    if !matches!(
+        download.status.as_str(),
+        "awaiting_match" | "rejected"
+    ) {
+        return Err(AppError::BadRequest(
+            "This download has already been matched or started".into(),
+        ));
+    }
 
     let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
         .fetch_one(&state.pool)
         .await?;
 
-    if settings.qbittorrent_url.is_empty() {
-        return Err(AppError::BadRequest(
-            "qBittorrent is not configured. Ask an administrator to finish setup.".into(),
-        ));
-    }
-
     let m = body.match_data;
     let authors = serde_json::to_string(&m.authors).unwrap_or_else(|_| "[]".into());
     let narrators = serde_json::to_string(&m.narrators).unwrap_or_else(|_| "[]".into());
     let library_id = resolve_library_id(&state.pool, auth.user.id, body.library_id).await?;
-
-    check_active_torrent_limit(&state.pool, auth.user.id).await?;
+    let map_files = body.map_files;
 
     sqlx::query("DELETE FROM book_metadata WHERE download_id = ? AND download_item_id IS NULL")
         .bind(download.id)
@@ -1289,22 +1392,233 @@ pub async fn match_metadata(
     .execute(&state.pool)
     .await?;
 
-    state
-        .qb
-        .add_magnet(
-            &settings.qbittorrent_url,
-            &settings.qbittorrent_username,
-            &settings.qbittorrent_password,
-            &download.magnet_uri,
-            Some("audiobooks"),
+    // Requesters match Audible first, then wait for an approver to start qBit.
+    if auth.user.is_requester() {
+        sqlx::query(
+            r#"
+            UPDATE downloads SET
+                status = 'pending_approval',
+                kind = 'single',
+                map_files = ?,
+                name = COALESCE(name, ?),
+                library_id = ?,
+                error_message = NULL,
+                updated_at = datetime('now')
+            WHERE id = ?
+            "#,
         )
+        .bind(map_files)
+        .bind(&m.title)
+        .bind(library_id)
+        .bind(download.id)
+        .execute(&state.pool)
         .await?;
 
-    sqlx::query(
-        "UPDATE downloads SET status = 'queued', kind = 'single', name = COALESCE(name, ?), library_id = ?, updated_at = datetime('now') WHERE id = ?",
+        let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+            .bind(download.id)
+            .fetch_one(&state.pool)
+            .await?;
+
+        return Ok(Json(json!({
+            "download": attach_metadata(&state.pool, download).await?,
+            "pending_approval": true,
+        })));
+    }
+
+    if settings.qbittorrent_url.is_empty() {
+        return Err(AppError::BadRequest(
+            "qBittorrent is not configured. Ask an administrator to finish setup.".into(),
+        ));
+    }
+
+    check_active_torrent_limit(&state.pool, auth.user.id).await?;
+
+    let download = add_magnet_queued(
+        &state,
+        &settings,
+        &download,
+        "single",
+        map_files,
+        Some(&m.title),
+        Some(library_id),
     )
-    .bind(&m.title)
+    .await?;
+
+    Ok(Json(json!({
+        "download": attach_metadata(&state.pool, download).await?
+    })))
+}
+
+/// Approver/root: start qBit for a requester's pending matched download.
+pub async fn approve(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    auth.require_approver()?;
+    let download = load_download(&state.pool, id).await?;
+    if download.status != "pending_approval" {
+        return Err(AppError::BadRequest(
+            "Only pending approval requests can be approved".into(),
+        ));
+    }
+
+    let settings = sqlx::query_as::<_, Settings>("SELECT * FROM settings WHERE id = 1")
+        .fetch_one(&state.pool)
+        .await?;
+
+    check_active_torrent_limit(&state.pool, download.user_id).await?;
+
+    let kind = if download.kind == "pack" {
+        "pack"
+    } else {
+        "single"
+    };
+    let download = add_magnet_queued(
+        &state,
+        &settings,
+        &download,
+        kind,
+        download.map_files,
+        None,
+        download.library_id,
+    )
+    .await?;
+
+    Ok(Json(json!({
+        "download": attach_metadata(&state.pool, download).await?
+    })))
+}
+
+pub async fn reject(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath(id): AxumPath<i64>,
+    Json(body): Json<RejectRequest>,
+) -> AppResult<Json<Value>> {
+    auth.require_approver()?;
+    let download = load_download(&state.pool, id).await?;
+    if download.status != "pending_approval" {
+        return Err(AppError::BadRequest(
+            "Only pending approval requests can be rejected".into(),
+        ));
+    }
+
+    let reason = body
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Rejected by approver");
+
+    sqlx::query(
+        "UPDATE downloads SET status = 'rejected', error_message = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(reason)
+    .bind(download.id)
+    .execute(&state.pool)
+    .await?;
+
+    let download = sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
+        .bind(download.id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(Json(json!({
+        "download": attach_metadata(&state.pool, download).await?
+    })))
+}
+
+/// List downloads awaiting approval (approver / root).
+pub async fn list_pending(
+    State(state): State<AppState>,
+    auth: AuthSession,
+) -> AppResult<Json<Value>> {
+    auth.require_approver()?;
+    let rows = sqlx::query_as::<_, Download>(
+        "SELECT * FROM downloads WHERE status = 'pending_approval' ORDER BY created_at ASC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut downloads = Vec::new();
+    for row in rows {
+        let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
+            .bind(row.user_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .unwrap_or_else(|| "unknown".into());
+        let attached = attach_metadata(&state.pool, row).await?;
+        let mut value = serde_json::to_value(attached).unwrap_or_else(|_| json!({}));
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("username".into(), json!(username));
+        }
+        downloads.push(value);
+    }
+    Ok(Json(json!({ "downloads": downloads })))
+}
+
+/// Un-import a single auto-imported book so files can be remapped.
+pub async fn unimport_download(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    auth.require_can_start_downloads()?;
+    let download = load_user_download(&state.pool, auth.user.id, id).await?;
+    if download.kind != "single" {
+        return Err(AppError::BadRequest(
+            "Use item un-import for pack / mapped downloads".into(),
+        ));
+    }
+    if download.status == "copying" {
+        return Err(AppError::BadRequest(
+            "Cannot un-import while a copy is in progress".into(),
+        ));
+    }
+    if download.status != "imported" && download.status != "error" {
+        return Err(AppError::BadRequest(
+            "Only imported (or failed) single downloads can be un-imported for remapping".into(),
+        ));
+    }
+
+    let library_id = download.library_id.ok_or_else(|| {
+        AppError::BadRequest("Download has no library assigned".into())
+    })?;
+    let library = sqlx::query_as::<_, Library>(
+        "SELECT id, name, path, abs_id, abs_path, created_at FROM libraries WHERE id = ?",
+    )
     .bind(library_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Library for this download no longer exists".into()))?;
+
+    if Library::path_needs_config(&library.path) {
+        return Err(AppError::BadRequest(
+            "Library has no container path set; cannot safely delete the imported copy".into(),
+        ));
+    }
+
+    if let Some(dest) = download
+        .destination_path
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        remove_library_destination(Path::new(&library.path), dest).await?;
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE downloads SET
+            status = 'awaiting_map',
+            map_files = 1,
+            destination_path = NULL,
+            imported_at = NULL,
+            error_message = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+    )
     .bind(download.id)
     .execute(&state.pool)
     .await?;
@@ -1323,20 +1637,29 @@ pub async fn delete(
     State(state): State<AppState>,
     auth: AuthSession,
     AxumPath(id): AxumPath<i64>,
+    Query(query): Query<DeleteDownloadQuery>,
 ) -> AppResult<Json<Value>> {
+    let delete_files = query.delete_files;
+
     let download = if auth.user.is_root() {
-        sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?
+        load_download(&state.pool, id).await?
     } else {
-        sqlx::query_as::<_, Download>("SELECT * FROM downloads WHERE id = ? AND user_id = ?")
-            .bind(id)
-            .bind(auth.user.id)
-            .fetch_optional(&state.pool)
-            .await?
+        load_user_download(&state.pool, auth.user.id, id).await?
+    };
+
+    let is_pre_download = matches!(
+        download.status.as_str(),
+        "awaiting_match" | "pending_approval" | "rejected"
+    );
+
+    if !auth.user.is_root() {
+        if !is_pre_download && !auth.user.can_remove {
+            return Err(AppError::Forbidden);
+        }
+        if delete_files && !auth.user.can_remove_files {
+            return Err(AppError::Forbidden);
+        }
     }
-    .ok_or(AppError::NotFound)?;
 
     if matches!(
         download.status.as_str(),
@@ -1365,7 +1688,7 @@ pub async fn delete(
         .fetch_one(&state.pool)
         .await?;
 
-    if !settings.qbittorrent_url.is_empty() {
+    if !settings.qbittorrent_url.is_empty() && !is_pre_download {
         let _ = state
             .qb
             .delete_torrent(
@@ -1373,7 +1696,7 @@ pub async fn delete(
                 &settings.qbittorrent_username,
                 &settings.qbittorrent_password,
                 &download.info_hash,
-                false,
+                delete_files,
             )
             .await;
     }

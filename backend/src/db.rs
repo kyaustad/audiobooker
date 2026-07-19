@@ -107,8 +107,17 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/008_rate_limits.sql"),
     )
     .await?;
+    run_once(
+        pool,
+        "009_roles_approvals",
+        include_str!("../migrations/009_roles_approvals.sql"),
+    )
+    .await?;
     ensure_column(pool, "downloads", "library_id", "INTEGER REFERENCES libraries(id)").await?;
     ensure_column(pool, "downloads", "kind", "TEXT NOT NULL DEFAULT 'single'").await?;
+    ensure_column(pool, "downloads", "map_files", "INTEGER NOT NULL DEFAULT 0").await?;
+    ensure_column(pool, "users", "can_remove", "INTEGER NOT NULL DEFAULT 1").await?;
+    ensure_column(pool, "users", "can_remove_files", "INTEGER NOT NULL DEFAULT 0").await?;
     ensure_column(pool, "users", "notify_imported", "INTEGER NOT NULL DEFAULT 1").await?;
     ensure_column(
         pool,
@@ -202,24 +211,23 @@ async fn run_once(pool: &SqlitePool, version: &str, sql: &str) -> AppResult<()> 
     if exists.is_some() {
         return Ok(());
     }
+    // Strip full-line `--` comments *before* splitting on `;`, otherwise a
+    // semicolon inside a comment becomes a fake statement boundary
+    // (e.g. `-- … in place; rebuild users` → `rebuild users`).
+    let without_line_comments: String = sql
+        .lines()
+        .filter(|l| !l.trim().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     // Execute statements individually so a multi-statement migration cannot be
     // marked applied after only the first ALTER/CREATE succeeds.
-    for stmt in sql.split(';') {
+    for stmt in without_line_comments.split(';') {
         let stmt = stmt.trim();
-        if stmt.is_empty() || stmt.starts_with("--") {
+        if stmt.is_empty() {
             continue;
         }
-        // Skip pure comment blocks (lines that are only comments).
-        let without_comments: String = stmt
-            .lines()
-            .filter(|l| !l.trim().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let without_comments = without_comments.trim();
-        if without_comments.is_empty() {
-            continue;
-        }
-        sqlx::raw_sql(without_comments)
+        sqlx::raw_sql(stmt)
             .execute(pool)
             .await
             .map_err(|e| AppError::internal(format!("migration {version} failed: {e}")))?;
@@ -283,7 +291,7 @@ async fn seed_default_library(pool: &SqlitePool) -> AppResult<()> {
         INSERT OR IGNORE INTO user_libraries (user_id, library_id)
         SELECT u.id, l.id FROM users u
         CROSS JOIN libraries l
-        WHERE u.role = 'user' AND l.name = 'Default'
+        WHERE u.role IN ('user', 'requester', 'approver') AND l.name = 'Default'
         "#,
     )
     .execute(pool)

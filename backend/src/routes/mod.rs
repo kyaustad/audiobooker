@@ -49,16 +49,20 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api-key", get(api_key::info).post(api_key::rotate))
         .route("/downloads", get(downloads::list).post(downloads::create))
+        .route("/downloads/pending", get(downloads::list_pending))
         .route(
             "/downloads/{id}",
             get(downloads::get).delete(downloads::delete),
         )
         .route("/downloads/{id}/match", post(downloads::match_metadata))
+        .route("/downloads/{id}/approve", post(downloads::approve))
+        .route("/downloads/{id}/reject", post(downloads::reject))
         .route("/downloads/{id}/start-pack", post(downloads::start_pack))
         .route("/downloads/{id}/files", get(downloads::list_files))
         .route("/downloads/{id}/retry-imports", post(downloads::retry_pack_imports))
         .route("/downloads/{id}/retry-import", post(downloads::retry_import))
         .route("/downloads/{id}/reimport", post(downloads::reimport))
+        .route("/downloads/{id}/unimport", post(downloads::unimport_download))
         .route(
             "/downloads/{id}/refresh-qbittorrent",
             post(downloads::refresh_qbittorrent),

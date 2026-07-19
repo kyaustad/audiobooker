@@ -15,7 +15,9 @@
   import Browse from './pages/Browse.svelte'
   import ChangePassword from './pages/ChangePassword.svelte'
   import MapPack from './pages/MapPack.svelte'
+  import Approvals from './pages/Approvals.svelte'
   import CreatedBy from './lib/CreatedBy.svelte'
+  import { canApprove, isOperator, isRoot } from './lib/roles'
 
   let loading = $state(true)
   let toastMsg = $state<string | null>(null)
@@ -44,6 +46,7 @@
     '/api-key': ApiKey,
     '/browse': Browse,
     '/map/:id': MapPack,
+    '/approvals': Approvals,
     '/password': ChangePassword,
     '/account': ChangePassword,
   }
@@ -95,7 +98,8 @@
   function pageTitle() {
     if (path.startsWith('/browse')) return 'Discover'
     if (path.startsWith('/match')) return 'Match'
-    if (path.startsWith('/map')) return 'Map pack'
+    if (path.startsWith('/map')) return 'Map files'
+    if (path.startsWith('/approvals')) return 'Approvals'
     if (path.startsWith('/settings')) return 'Settings'
     if (path.startsWith('/users')) return 'Users'
     if (path.startsWith('/api-key')) return 'API Key'
@@ -126,11 +130,14 @@
       </div>
 
       <nav class="nav-desktop" aria-label="Primary">
-        {#if user.role === 'user'}
+        {#if isOperator(user)}
           <a href="#/" class:active={path === '/'}>Queue</a>
           <a href="#/browse" class:active={path.startsWith('/browse')}>Discover</a>
         {/if}
-        {#if user.role === 'root'}
+        {#if canApprove(user)}
+          <a href="#/approvals" class:active={path.startsWith('/approvals')}>Approvals</a>
+        {/if}
+        {#if isRoot(user)}
           <a href="#/settings" class:active={path === '/settings'}>Settings</a>
           <a href="#/users" class:active={path === '/users'}>Users</a>
           <a href="#/api-key" class:active={path === '/api-key'}>API Key</a>
@@ -141,11 +148,14 @@
 
       {#if menuOpen}
         <nav class="nav-drawer" aria-label="Menu">
-          {#if user.role === 'user'}
+          {#if isOperator(user)}
             <a href="#/" class:active={path === '/'}>Queue</a>
             <a href="#/browse" class:active={path.startsWith('/browse')}>Discover</a>
           {/if}
-          {#if user.role === 'root'}
+          {#if canApprove(user)}
+            <a href="#/approvals" class:active={path.startsWith('/approvals')}>Approvals</a>
+          {/if}
+          {#if isRoot(user)}
             <a href="#/settings" class:active={path === '/settings'}>Settings</a>
             <a href="#/users" class:active={path === '/users'}>Users</a>
             <a href="#/api-key" class:active={path === '/api-key'}>API Key</a>
@@ -164,7 +174,7 @@
       <CreatedBy />
     </footer>
 
-    {#if user.role === 'user'}
+    {#if isOperator(user)}
       <nav class="bottom-nav" aria-label="Primary">
         <a href="#/" class:active={path === '/' || path.startsWith('/match') || path.startsWith('/map')}>
           <span class="bn-label">Queue</span>
@@ -172,12 +182,20 @@
         <a href="#/browse" class:active={path.startsWith('/browse')}>
           <span class="bn-label">Discover</span>
         </a>
+        {#if canApprove(user)}
+          <a href="#/approvals" class:active={path.startsWith('/approvals')}>
+            <span class="bn-label">Approvals</span>
+          </a>
+        {/if}
         <a href="#/account" class:active={path.startsWith('/password') || path.startsWith('/account')}>
           <span class="bn-label">Account</span>
         </a>
       </nav>
-    {:else if user.role === 'root'}
+    {:else if isRoot(user)}
       <nav class="bottom-nav" aria-label="Primary">
+        <a href="#/approvals" class:active={path.startsWith('/approvals')}>
+          <span class="bn-label">Approvals</span>
+        </a>
         <a href="#/settings" class:active={path === '/settings'}>
           <span class="bn-label">Settings</span>
         </a>

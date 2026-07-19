@@ -324,8 +324,23 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .badge.downloading, .badge.queued, .badge.copying { color: var(--accent); }
 .badge.imported, .badge.completed, .badge.partial { color: var(--success); }
-.badge.error, .badge.awaiting_match, .badge.awaiting_map { color: var(--warning); }
+.badge.error, .badge.awaiting_match, .badge.awaiting_map, .badge.pending_approval, .badge.rejected { color: var(--warning); }
 .badge.pack { color: var(--accent); }
+.badge.role-requester {
+  color: var(--warning);
+  border-color: color-mix(in oklab, var(--warning) 40%, var(--border));
+}
+.badge.role-user {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 40%, var(--border));
+}
+.badge.role-approver {
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 40%, var(--border));
+}
+.badge.role-root {
+  color: var(--muted);
+}
 
 .progress {
   height: 6px;

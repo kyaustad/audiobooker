@@ -6,21 +6,27 @@ use sqlx::FromRow;
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Root,
+    Requester,
     User,
+    Approver,
 }
 
 impl Role {
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::Root => "root",
+            Role::Requester => "requester",
             Role::User => "user",
+            Role::Approver => "approver",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "root" => Some(Role::Root),
+            "requester" => Some(Role::Requester),
             "user" => Some(Role::User),
+            "approver" => Some(Role::Approver),
             _ => None,
         }
     }
@@ -43,6 +49,10 @@ pub struct User {
     pub rate_limit_requests: Option<i64>,
     pub rate_limit_window_secs: Option<i64>,
     pub rate_limit_active_torrents: Option<i64>,
+    /// May remove torrents from Audiobooker / qBittorrent (non-seeding).
+    pub can_remove: bool,
+    /// May also delete torrent downloaded data from disk when removing.
+    pub can_remove_files: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -51,7 +61,7 @@ pub struct User {
 pub const USER_COLUMNS: &str = "id, username, password_hash, role, must_change_password, \
     notify_imported, notify_download_finished, notify_pack_ready, notify_failures, \
     abs_user_id, rate_limit_requests, rate_limit_window_secs, rate_limit_active_torrents, \
-    created_at, updated_at";
+    can_remove, can_remove_files, created_at, updated_at";
 
 /// Same as `USER_COLUMNS` with a table/alias prefix (e.g. `"u"` → `u.id, u.username, …`).
 pub fn user_columns_prefixed(prefix: &str) -> String {
@@ -103,6 +113,27 @@ impl NotificationPrefs {
 impl User {
     pub fn is_root(&self) -> bool {
         self.role == "root"
+    }
+
+    pub fn is_requester(&self) -> bool {
+        self.role == "requester"
+    }
+
+    /// Browse / request / match (not root).
+    pub fn is_operator(&self) -> bool {
+        matches!(
+            self.role.as_str(),
+            "requester" | "user" | "approver"
+        )
+    }
+
+    /// May start qBittorrent / map files / import (not requester, not root).
+    pub fn can_start_downloads(&self) -> bool {
+        matches!(self.role.as_str(), "user" | "approver")
+    }
+
+    pub fn can_approve(&self) -> bool {
+        matches!(self.role.as_str(), "approver" | "root")
     }
 
     pub fn notification_prefs(&self) -> NotificationPrefs {
@@ -233,10 +264,18 @@ pub struct Download {
     pub error_message: Option<String>,
     pub library_id: Option<i64>,
     pub kind: String,
+    /// When true (singles), download first then map files like a pack.
+    pub map_files: bool,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
     pub imported_at: Option<String>,
+}
+
+impl Download {
+    pub fn uses_file_mapping(&self) -> bool {
+        self.kind == "pack" || self.map_files
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -333,6 +372,8 @@ pub struct AuthUser {
     pub username: String,
     pub role: String,
     pub must_change_password: bool,
+    pub can_remove: bool,
+    pub can_remove_files: bool,
 }
 
 impl From<User> for AuthUser {
@@ -342,6 +383,8 @@ impl From<User> for AuthUser {
             username: u.username,
             role: u.role,
             must_change_password: u.must_change_password,
+            can_remove: u.can_remove,
+            can_remove_files: u.can_remove_files,
         }
     }
 }

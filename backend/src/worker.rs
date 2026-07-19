@@ -83,7 +83,7 @@ async fn recover_stale_copies(pool: &SqlitePool) -> anyhow::Result<()> {
             status = 'completed',
             error_message = NULL,
             updated_at = datetime('now')
-        WHERE kind = 'pack'
+        WHERE (kind = 'pack' OR map_files = 1)
           AND status IN ('copying', 'partial', 'imported', 'error', 'awaiting_map')
           AND EXISTS (
             SELECT 1 FROM download_items
@@ -121,7 +121,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         SELECT * FROM downloads
         WHERE status IN ('queued', 'downloading', 'completed', 'copying', 'awaiting_map', 'partial')
            OR (
-             kind = 'pack'
+             (kind = 'pack' OR map_files = 1)
              AND status = 'imported'
              AND EXISTS (
                SELECT 1 FROM download_items
@@ -177,7 +177,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
             }
             // Packs may still import mapped items from disk after qBit drops them —
             // only try when we already have content paths.
-            if download.kind == "pack"
+            if download.uses_file_mapping()
                 && matches!(download.status.as_str(), "awaiting_map" | "partial" | "completed")
             {
                 import_download(pool, &settings, download.id).await?;
@@ -190,7 +190,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         }
         // Fully-imported packs with no pending items are skipped by the SQL filter;
         // imported packs that still have ready/error items continue below.
-        if download.status == "imported" && download.kind != "pack" {
+        if download.status == "imported" && !download.uses_file_mapping() {
             continue;
         }
 
@@ -232,7 +232,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
                 save_path = ?,
                 content_path = ?,
                 status = CASE
-                    WHEN status = 'awaiting_match' THEN status
+                    WHEN status IN ('awaiting_match', 'pending_approval', 'rejected') THEN status
                     WHEN status IN ('awaiting_map', 'partial') AND ? = 'completed' THEN status
                     ELSE ?
                 END,
@@ -268,7 +268,7 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         }
 
         // Existing installs: when qBit moves incomplete → complete, requeue failed imports.
-        if download.kind == "pack"
+        if download.uses_file_mapping()
             && (paths_moved_off_incomplete || (torrent_completed && newly_completed))
         {
             sqlx::query(
@@ -306,15 +306,15 @@ async fn sync_once(pool: &SqlitePool, qb: &QbittorrentClient) -> anyhow::Result<
         }
 
         if newly_completed {
-            if download.kind == "pack" {
+            if download.uses_file_mapping() {
                 push(
                     pool,
                     &settings,
                     download.user_id,
                     NotifyKind::PackReady,
-                    "Pack ready to map",
+                    "Ready to map",
                     &format!(
-                        "{} finished downloading — map books to import",
+                        "{} finished downloading — map files to import",
                         display_name(&download)
                     ),
                 )
@@ -404,7 +404,7 @@ async fn import_download(pool: &SqlitePool, settings: &Settings, download_id: i6
         return Ok(());
     }
 
-    if download.kind == "pack" {
+    if download.uses_file_mapping() {
         return import_pack(pool, settings, download).await;
     }
 

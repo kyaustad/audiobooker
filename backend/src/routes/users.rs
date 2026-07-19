@@ -16,6 +16,10 @@ pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
     pub library_ids: Option<Vec<i64>>,
+    /// requester | user | approver (default user)
+    pub role: Option<String>,
+    pub can_remove: Option<bool>,
+    pub can_remove_files: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -23,6 +27,9 @@ pub struct UpdateUserRequest {
     pub password: Option<String>,
     pub library_ids: Option<Vec<i64>>,
     pub must_change_password: Option<bool>,
+    pub role: Option<String>,
+    pub can_remove: Option<bool>,
+    pub can_remove_files: Option<bool>,
     /// Present in JSON (including null) to set/clear; omitted leaves unchanged.
     #[serde(default, deserialize_with = "deserialize_opt_opt_i64")]
     pub rate_limit_requests: Option<Option<i64>>,
@@ -50,9 +57,22 @@ fn user_json(u: &User, libraries: &[Library]) -> Value {
         "rate_limit_requests": u.rate_limit_requests,
         "rate_limit_window_secs": u.rate_limit_window_secs,
         "rate_limit_active_torrents": u.rate_limit_active_torrents,
+        "can_remove": u.can_remove,
+        "can_remove_files": u.can_remove_files,
         "libraries": libraries,
         "library_ids": libraries.iter().map(|l| l.id).collect::<Vec<_>>(),
     })
+}
+
+fn parse_assignable_role(raw: Option<&str>) -> AppResult<&'static str> {
+    match raw.unwrap_or("user") {
+        "requester" => Ok("requester"),
+        "user" => Ok("user"),
+        "approver" => Ok("approver"),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid role '{other}' (use requester, user, or approver)"
+        ))),
+    }
 }
 
 async fn libraries_for_user(pool: &sqlx::SqlitePool, user_id: i64) -> AppResult<Vec<Library>> {
@@ -166,15 +186,22 @@ pub async fn create(
         ));
     }
 
+    let role = parse_assignable_role(body.role.as_deref())?;
+    let can_remove = body.can_remove.unwrap_or(true);
+    let can_remove_files = body.can_remove_files.unwrap_or(false);
+
     let hash = hash_password(&body.password)?;
     let result = sqlx::query(
         r#"
-        INSERT INTO users (username, password_hash, role, must_change_password)
-        VALUES (?, ?, 'user', 1)
+        INSERT INTO users (username, password_hash, role, must_change_password, can_remove, can_remove_files)
+        VALUES (?, ?, ?, 1, ?, ?)
         "#,
     )
     .bind(&username)
     .bind(hash)
+    .bind(role)
+    .bind(can_remove)
+    .bind(can_remove_files)
     .execute(&state.pool)
     .await?;
 
@@ -186,8 +213,10 @@ pub async fn create(
         "user": {
             "id": user_id,
             "username": username,
-            "role": "user",
+            "role": role,
             "must_change_password": true,
+            "can_remove": can_remove,
+            "can_remove_files": can_remove_files,
             "libraries": libraries,
             "library_ids": library_ids,
         }
@@ -240,6 +269,30 @@ pub async fn update(
 
     if let Some(library_ids) = body.library_ids {
         set_user_libraries(&state.pool, id, &library_ids).await?;
+    }
+
+    if let Some(role_raw) = body.role.as_deref() {
+        let role = parse_assignable_role(Some(role_raw))?;
+        sqlx::query(
+            "UPDATE users SET role = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(role)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    if body.can_remove.is_some() || body.can_remove_files.is_some() {
+        let can_remove = body.can_remove.unwrap_or(user.can_remove);
+        let can_remove_files = body.can_remove_files.unwrap_or(user.can_remove_files);
+        sqlx::query(
+            "UPDATE users SET can_remove = ?, can_remove_files = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(can_remove)
+        .bind(can_remove_files)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
     }
 
     if body.rate_limit_requests.is_some()

@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
-  import { api, type Download } from '../lib/api'
+  import { api, type Download, type User } from '../lib/api'
+  import { canStartDownloads, isRequester } from '../lib/roles'
   import { enableNotifications, getPushStatus } from '../lib/push'
+  import { currentUser } from '../lib/session'
   import { showToast } from '../lib/toast'
 
   type Tab = 'all' | 'matching' | 'active' | 'completed' | 'failed'
@@ -20,15 +22,26 @@
   let isIos = $state(false)
   let tab = $state<Tab>('all')
   let removingId = $state<number | null>(null)
+  let removeTarget = $state<Download | null>(null)
+  let removeDeleteFiles = $state(false)
   let refreshingId = $state<number | null>(null)
   let retryingId = $state<number | null>(null)
+  let user = $state<User | null>(null)
   let timer: number | undefined
+
+  currentUser.subscribe((v) => (user = v))
 
   const SEEDING_STATUSES = new Set(['completed', 'copying', 'imported', 'awaiting_map', 'partial'])
 
   function tabFor(status: string): Tab {
-    if (status === 'awaiting_match' || status === 'awaiting_map') return 'matching'
-    if (status === 'error') return 'failed'
+    if (
+      status === 'awaiting_match' ||
+      status === 'awaiting_map' ||
+      status === 'pending_approval'
+    ) {
+      return 'matching'
+    }
+    if (status === 'error' || status === 'rejected') return 'failed'
     if (status === 'imported' || status === 'partial' || status === 'completed' || status === 'copying') {
       return 'completed'
     }
@@ -38,18 +51,31 @@
   function canRemove(d: Download) {
     if (SEEDING_STATUSES.has(d.status)) return false
     if ((d.items || []).some((i) => i.status === 'imported')) return false
-    return true
+    const preDownload = ['awaiting_match', 'pending_approval', 'rejected'].includes(d.status)
+    if (preDownload) return true
+    return user?.can_remove !== false
+  }
+
+  function isPreDownload(d: Download) {
+    return ['awaiting_match', 'pending_approval', 'rejected'].includes(d.status)
+  }
+
+  function removeLabel(d: Download) {
+    return d.metadata?.title || d.name || 'this download'
   }
 
   function isPack(d: Download) {
     return (d.kind || 'single') === 'pack'
   }
 
-  /** Refresh qBit is for packs (path moves / remapping), not finished singles. */
+  function usesMapping(d: Download) {
+    return isPack(d) || Boolean(d.map_files)
+  }
+
+  /** Refresh qBit is for mapped downloads (path moves / remapping), not finished singles. */
   function showRefreshQbit(d: Download) {
-    if (!isPack(d)) return false
-    if (d.status === 'awaiting_match') return false
-    // Fully imported packs with nothing left to map still don't need it on the overview.
+    if (!usesMapping(d) || !canStartDownloads(user)) return false
+    if (d.status === 'awaiting_match' || d.status === 'pending_approval') return false
     if (d.status === 'imported') {
       const items = d.items || []
       return items.some((i) => i.status === 'error' || i.status === 'ready' || i.status === 'pending')
@@ -58,27 +84,40 @@
   }
 
   function showMap(d: Download) {
-    return isPack(d) && d.status !== 'awaiting_match'
+    if (!canStartDownloads(user)) return false
+    return usesMapping(d) && !['awaiting_match', 'pending_approval', 'rejected'].includes(d.status)
   }
 
   /** Single-book stuck copy or failed import after metadata match. */
   function showRetryImport(d: Download) {
-    if (isPack(d)) return false
+    if (!canStartDownloads(user)) return false
+    if (usesMapping(d)) return false
     if (d.status === 'copying') return true
     return d.status === 'error' && Boolean(d.metadata)
   }
 
   function showReimport(d: Download) {
-    return !isPack(d) && d.status === 'imported' && Boolean(d.metadata)
+    return canStartDownloads(user) && !usesMapping(d) && d.status === 'imported' && Boolean(d.metadata)
+  }
+
+  function showUnimport(d: Download) {
+    return (
+      canStartDownloads(user) &&
+      !usesMapping(d) &&
+      (d.status === 'imported' || (d.status === 'error' && Boolean(d.destination_path))) &&
+      Boolean(d.metadata)
+    )
   }
 
   function hasActions(d: Download) {
     return (
       d.status === 'awaiting_match' ||
+      d.status === 'rejected' ||
       showMap(d) ||
       showRefreshQbit(d) ||
       showRetryImport(d) ||
       showReimport(d) ||
+      showUnimport(d) ||
       canRemove(d)
     )
   }
@@ -153,24 +192,57 @@
     }
   }
 
-  async function remove(d: Download) {
+  function openRemoveDialog(d: Download) {
     if (!canRemove(d)) {
       showToast('Completed downloads stay in the queue to seed. qBittorrent removes them at your ratio limit.')
       return
     }
-    const label = d.metadata?.title || d.name || 'this download'
-    if (!window.confirm(`Remove “${label}” from the queue?\n\nThis also removes it from qBittorrent but keeps downloaded files.`)) {
-      return
-    }
+    removeTarget = d
+    removeDeleteFiles = false
+  }
+
+  function closeRemoveDialog() {
+    if (removingId != null) return
+    removeTarget = null
+    removeDeleteFiles = false
+  }
+
+  async function confirmRemove() {
+    const d = removeTarget
+    if (!d) return
+    const deleteFiles = !isPreDownload(d) && Boolean(user?.can_remove_files) && removeDeleteFiles
     removingId = d.id
     try {
-      await api.deleteDownload(d.id)
-      showToast('Removed from queue')
+      await api.deleteDownload(d.id, deleteFiles)
+      showToast(deleteFiles ? 'Removed (files deleted)' : 'Removed from queue')
+      removeTarget = null
+      removeDeleteFiles = false
       await refresh()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to remove')
     } finally {
       removingId = null
+    }
+  }
+
+  async function unimportSingle(d: Download) {
+    const label = d.metadata?.title || d.name || 'this book'
+    if (
+      !window.confirm(
+        `Un-import “${label}”?\n\nDeletes the library copy so you can map the correct files from the download.`,
+      )
+    ) {
+      return
+    }
+    retryingId = d.id
+    try {
+      await api.unimportDownload(d.id)
+      showToast('Un-imported — map files next')
+      push(`/map/${d.id}`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Un-import failed')
+    } finally {
+      retryingId = null
     }
   }
 
@@ -269,7 +341,11 @@
     <div>
       <h2>Your queue</h2>
       <p class="muted hide-mobile">
-        Add an info hash or magnet, then match Audible metadata before download starts.
+        {#if isRequester(user)}
+          Add a magnet or info hash, match Audible, then wait for an approver to start the download.
+        {:else}
+          Add an info hash or magnet, then match Audible metadata before download starts.
+        {/if}
       </p>
       <p class="muted push-line">
         Notifications: {pushSubscribed ? 'on' : 'off'}
@@ -314,7 +390,7 @@
   <div class="status-tabs" role="tablist" aria-label="Download status">
     {#each [
       ['all', 'All'],
-      ['matching', 'Matching'],
+      ['matching', 'Waiting'],
       ['active', 'Active'],
       ['completed', 'Completed'],
       ['failed', 'Failed'],
@@ -357,8 +433,10 @@
               <span class={`badge ${d.status}`}>{statusLabel(d.status)}</span>
               {#if isPack(d)}
                 <span class="badge pack">pack</span>
+              {:else if d.map_files}
+                <span class="badge pack">map files</span>
               {/if}
-              {#if d.status === 'imported' && !isPack(d)}
+              {#if d.status === 'imported' && !usesMapping(d)}
                 <span class="badge seeding-pill">seeding</span>
               {/if}
             </div>
@@ -383,7 +461,7 @@
           </div>
           {#if hasActions(d)}
             <div class="actions">
-              {#if d.status === 'awaiting_match'}
+              {#if d.status === 'awaiting_match' || d.status === 'rejected'}
                 <a class="btn" href={`#/match/${d.id}`}>Match</a>
               {/if}
               {#if showMap(d)}
@@ -418,6 +496,16 @@
                   {retryingId === d.id ? '…' : 'Re-import'}
                 </button>
               {/if}
+              {#if showUnimport(d)}
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={retryingId === d.id}
+                  onclick={() => unimportSingle(d)}
+                >
+                  {retryingId === d.id ? '…' : 'Un-import → Map'}
+                </button>
+              {/if}
               {#if showRefreshQbit(d)}
                 <button
                   class="secondary"
@@ -434,7 +522,7 @@
                 </button>
               {/if}
               {#if canRemove(d)}
-                <button class="danger" type="button" disabled={removingId === d.id} onclick={() => remove(d)}>
+                <button class="danger" type="button" disabled={removingId === d.id} onclick={() => openRemoveDialog(d)}>
                   {removingId === d.id ? '…' : 'Remove'}
                 </button>
               {/if}
@@ -445,6 +533,70 @@
     </div>
   {/if}
 </div>
+
+{#if removeTarget}
+  <div
+    class="modal-backdrop"
+    role="presentation"
+    onclick={closeRemoveDialog}
+    onkeydown={(e) => e.key === 'Escape' && closeRemoveDialog()}
+  >
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="remove-dialog-title"
+      tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
+    >
+      <h3 id="remove-dialog-title">Remove download?</h3>
+      <p class="modal-title">{removeLabel(removeTarget)}</p>
+
+      {#if isPreDownload(removeTarget)}
+        <p class="muted">
+          This removes the request from your queue. Nothing has been sent to qBittorrent yet.
+        </p>
+      {:else}
+        <p class="muted">
+          This removes the item from your Audiobooker queue and from qBittorrent.
+        </p>
+        {#if user?.can_remove_files}
+          <label class="remove-option">
+            <input type="checkbox" bind:checked={removeDeleteFiles} disabled={removingId != null} />
+            <span>
+              <strong>Also delete downloaded files</strong>
+              <span class="muted">
+                {#if removeDeleteFiles}
+                  Removes the torrent and deletes its data from disk.
+                {:else}
+                  Removes the torrent from qBittorrent but keeps files on disk.
+                {/if}
+              </span>
+            </span>
+          </label>
+        {:else}
+          <p class="muted keep-note">Downloaded files on disk will be kept.</p>
+        {/if}
+      {/if}
+
+      <div class="modal-actions">
+        <button class="secondary" type="button" disabled={removingId != null} onclick={closeRemoveDialog}>
+          Cancel
+        </button>
+        <button class="danger" type="button" disabled={removingId != null} onclick={confirmRemove}>
+          {#if removingId != null}
+            Removing…
+          {:else if !isPreDownload(removeTarget) && removeDeleteFiles}
+            Remove + delete files
+          {:else}
+            Remove
+          {/if}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .queue-hero-top {
@@ -708,6 +860,88 @@
       width: 100%;
       text-align: center;
       justify-content: center;
+    }
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+    background: rgba(4, 8, 14, 0.72);
+    backdrop-filter: blur(4px);
+  }
+  .modal {
+    width: min(420px, 100%);
+    max-height: min(90vh, 560px);
+    overflow: auto;
+    background: color-mix(in oklab, var(--bg-elevated) 96%, black);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.15rem 1.2rem 1.2rem;
+    display: grid;
+    gap: 0.75rem;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  }
+  .modal h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    letter-spacing: -0.02em;
+  }
+  .modal-title {
+    margin: 0;
+    font-weight: 600;
+    line-height: 1.3;
+    word-break: break-word;
+  }
+  .modal .muted {
+    margin: 0;
+  }
+  .keep-note {
+    font-size: 0.88rem;
+  }
+  .remove-option {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: flex-start;
+    gap: 0.7rem;
+    margin: 0;
+    padding: 0.8rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .remove-option input {
+    margin-top: 0.2rem;
+  }
+  .remove-option span {
+    display: grid;
+    gap: 0.2rem;
+  }
+  .remove-option strong {
+    font-size: 0.92rem;
+  }
+  .modal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-top: 0.25rem;
+  }
+  .modal-actions button {
+    min-width: 6.5rem;
+  }
+  @media (max-width: 640px) {
+    .modal-actions {
+      flex-direction: column-reverse;
+    }
+    .modal-actions button {
+      width: 100%;
     }
   }
 </style>

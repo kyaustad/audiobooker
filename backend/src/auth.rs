@@ -108,8 +108,25 @@ impl AuthSession {
         }
     }
 
-    pub fn require_user_role(&self) -> AppResult<()> {
-        if self.user.role == "user" {
+    /// Non-root operator accounts (requester / user / approver).
+    pub fn require_operator(&self) -> AppResult<()> {
+        if self.user.is_operator() {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden)
+        }
+    }
+
+    pub fn require_can_start_downloads(&self) -> AppResult<()> {
+        if self.user.can_start_downloads() {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden)
+        }
+    }
+
+    pub fn require_approver(&self) -> AppResult<()> {
+        if self.user.can_approve() {
             Ok(())
         } else {
             Err(AppError::Forbidden)
