@@ -1,4 +1,5 @@
 mod abb;
+mod abb_cache;
 mod abs_users;
 mod auth;
 mod config;
@@ -42,11 +43,11 @@ async fn main() -> anyhow::Result<()> {
     worker::spawn_worker(pool.clone(), qb.clone());
 
     let state = AppState {
-        pool,
+        pool: pool.clone(),
         config: config.clone(),
         qb,
         metadata: MetadataClient::new(),
-        abb: AbbClient::new(),
+        abb: AbbClient::new(pool),
     };
 
     let app = routes::router(state);

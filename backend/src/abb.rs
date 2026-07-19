@@ -1,7 +1,9 @@
 use reqwest::Client;
 use scraper::{Html, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 
+use crate::abb_cache;
 use crate::error::{AppError, AppResult};
 use crate::magnet::normalize_info_hash;
 
@@ -11,7 +13,17 @@ const ABB_MIRRORS: &[&str] = &["https://audiobookbay.lu"];
 /// WordPress lists ~9–10 posts per page on ABB.
 const ABB_PAGE_SIZE: usize = 9;
 
-#[derive(Debug, Clone, Serialize)]
+/// Generic desktop browser UAs — rotated per request to look ordinary.
+const USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbbSearchResult {
     pub title: String,
     pub url: String,
@@ -26,7 +38,7 @@ pub struct AbbSearchResult {
     pub category: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbbSearchPage {
     pub results: Vec<AbbSearchResult>,
     pub page: u32,
@@ -46,7 +58,7 @@ pub struct AbbCategory {
     pub group: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbbDetails {
     pub title: String,
     pub url: String,
@@ -64,34 +76,56 @@ pub struct AbbDetails {
 #[derive(Clone)]
 pub struct AbbClient {
     http: Client,
-}
-
-impl Default for AbbClient {
-    fn default() -> Self {
-        Self::new()
-    }
+    pool: SqlitePool,
 }
 
 impl AbbClient {
-    pub fn new() -> Self {
+    pub fn new(pool: SqlitePool) -> Self {
         Self {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::limited(10))
                 .cookie_store(true)
                 .gzip(true)
-                .user_agent(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                     (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                )
+                // UA set per-request from USER_AGENTS.
                 .build()
                 .expect("reqwest client"),
+            pool,
         }
+    }
+
+    fn pick_user_agent() -> &'static str {
+        use rand::Rng;
+        let i = rand::thread_rng().gen_range(0..USER_AGENTS.len());
+        USER_AGENTS[i]
     }
 
     /// Homepage / “recent uploads” feed (Discover default).
     pub async fn latest(&self, page: u32) -> AppResult<AbbSearchPage> {
         let page = page.max(1);
+        if let Some(cached) = abb_cache::get_fresh_page(&self.pool, "latest", "", page).await? {
+            tracing::debug!(page, "ABB latest cache hit");
+            return Ok(cached);
+        }
+
+        match self.fetch_latest(page).await {
+            Ok(result) => {
+                if let Err(err) = abb_cache::put_page(&self.pool, &result).await {
+                    tracing::warn!(error = %err, "failed to cache ABB latest page");
+                }
+                Ok(result)
+            }
+            Err(err) => {
+                if let Some(stale) = abb_cache::get_stale_page(&self.pool, "latest", "", page).await?
+                {
+                    return Ok(stale);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn fetch_latest(&self, page: u32) -> AppResult<AbbSearchPage> {
         let base = ABB_MIRRORS[0];
 
         let url = if page <= 1 {
@@ -101,11 +135,23 @@ impl AbbClient {
         };
 
         tracing::info!(%url, "ABB latest RSS fetch");
-        let xml = self.fetch_text(&url, base, "application/rss+xml, application/xml, text/xml, */*;q=0.8").await?;
+        let xml = self
+            .fetch_text(
+                &url,
+                base,
+                "application/rss+xml, application/xml, text/xml, */*;q=0.8",
+            )
+            .await?;
         let results = parse_rss_feed(&xml, base);
         if results.is_empty() && page == 1 {
             // HTML homepage fallback
-            let html = self.fetch_text(&format!("{base}/"), base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8").await?;
+            let html = self
+                .fetch_text(
+                    &format!("{base}/"),
+                    base,
+                    "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+                )
+                .await?;
             let results = parse_listing(&html, base);
             if results.is_empty() {
                 return Err(AppError::Internal(
@@ -141,8 +187,35 @@ impl AbbClient {
         let slug = normalize_category_slug(slug).ok_or_else(|| {
             AppError::BadRequest("Unknown or invalid AudiobookBay category".into())
         })?;
-        let label = category_label_for(&slug);
         let page = page.max(1);
+
+        if let Some(cached) =
+            abb_cache::get_fresh_page(&self.pool, "category", &slug, page).await?
+        {
+            tracing::debug!(%slug, page, "ABB category cache hit");
+            return Ok(cached);
+        }
+
+        match self.fetch_category(&slug, page).await {
+            Ok(result) => {
+                if let Err(err) = abb_cache::put_page(&self.pool, &result).await {
+                    tracing::warn!(error = %err, "failed to cache ABB category page");
+                }
+                Ok(result)
+            }
+            Err(err) => {
+                if let Some(stale) =
+                    abb_cache::get_stale_page(&self.pool, "category", &slug, page).await?
+                {
+                    return Ok(stale);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn fetch_category(&self, slug: &str, page: u32) -> AppResult<AbbSearchPage> {
+        let label = category_label_for(slug);
         let base = ABB_MIRRORS[0];
 
         let url = if page <= 1 {
@@ -153,7 +226,7 @@ impl AbbClient {
 
         tracing::info!(%url, "ABB category fetch");
         let html = self
-            .fetch_text(&url, base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+            .fetch_text(url.as_str(), base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
             .await?;
         if !is_abb_search_results_page(&html) {
             return Err(AppError::Internal(format!(
@@ -168,7 +241,7 @@ impl AbbClient {
             mirror: base.to_string(),
             mode: "category".into(),
             query: None,
-            category: Some(slug),
+            category: Some(slug.to_string()),
             category_label: Some(label),
         })
     }
@@ -183,6 +256,50 @@ impl AbbClient {
             return Err(AppError::BadRequest("Search query required".into()));
         }
         let page = page.max(1);
+        let q_key = q.to_ascii_lowercase();
+
+        if let Some(cached) =
+            abb_cache::get_fresh_page(&self.pool, "search", &q_key, page).await?
+        {
+            tracing::debug!(%q_key, page, "ABB search page cache hit");
+            return Ok(cached);
+        }
+
+        // Prefer previously discovered listings before hitting ABB again.
+        if let Some(local) = abb_cache::local_search_page(
+            &self.pool,
+            &q_key,
+            page,
+            ABB_PAGE_SIZE,
+            ABB_MIRRORS[0],
+        )
+        .await?
+        {
+            if let Err(err) = abb_cache::put_page(&self.pool, &local).await {
+                tracing::warn!(error = %err, "failed to cache local ABB search page");
+            }
+            return Ok(local);
+        }
+
+        match self.fetch_search(q, page).await {
+            Ok(result) => {
+                if let Err(err) = abb_cache::put_page(&self.pool, &result).await {
+                    tracing::warn!(error = %err, "failed to cache ABB search page");
+                }
+                Ok(result)
+            }
+            Err(err) => {
+                if let Some(stale) =
+                    abb_cache::get_stale_page(&self.pool, "search", &q_key, page).await?
+                {
+                    return Ok(stale);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn fetch_search(&self, q: &str, page: u32) -> AppResult<AbbSearchPage> {
         // ABB 301s mixed-case `?s=` to the homepage (losing the query). Always
         // use lowercase like https://audiobookbay.lu/?s=sunrise+on+the+reaping&cat=undefined%2Cundefined
         let encoded = encode_abb_query(q);
@@ -279,12 +396,35 @@ impl AbbClient {
         } else {
             format!("{}/{path_or_url}", ABB_MIRRORS[0])
         };
+        let cache_url = abb_cache::normalize_listing_url(&url);
 
-        let base = origin_of(&url).unwrap_or_else(|| ABB_MIRRORS[0].to_string());
+        if let Some(cached) = abb_cache::get_fresh_details(&self.pool, &cache_url).await? {
+            tracing::debug!(%cache_url, "ABB details cache hit");
+            return Ok(cached);
+        }
+
+        match self.fetch_details(&url).await {
+            Ok(details) => {
+                if let Err(err) = abb_cache::put_details(&self.pool, &details).await {
+                    tracing::warn!(error = %err, "failed to cache ABB details");
+                }
+                Ok(details)
+            }
+            Err(err) => {
+                if let Some(stale) = abb_cache::get_stale_details(&self.pool, &cache_url).await? {
+                    return Ok(stale);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn fetch_details(&self, url: &str) -> AppResult<AbbDetails> {
+        let base = origin_of(url).unwrap_or_else(|| ABB_MIRRORS[0].to_string());
         let html = self
-            .fetch_text(&url, &base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+            .fetch_text(url, &base, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
             .await?;
-        parse_details(&html, &url, &base).ok_or_else(|| {
+        parse_details(&html, url, &base).ok_or_else(|| {
             AppError::Internal(
                 "Could not parse AudiobookBay page (site layout may have changed)".into(),
             )
@@ -292,12 +432,27 @@ impl AbbClient {
     }
 
     async fn fetch_text(&self, url: &str, origin: &str, accept: &str) -> AppResult<String> {
-        let resp = self
+        let ua = Self::pick_user_agent();
+        let is_firefox = ua.contains("Firefox");
+        let mut req = self
             .http
             .get(url)
+            .header("User-Agent", ua)
             .header("Accept", accept)
             .header("Accept-Language", "en-US,en;q=0.9")
             .header("Referer", format!("{origin}/"))
+            .header("Upgrade-Insecure-Requests", "1");
+
+        // Chrome-like client hints; skip for Firefox UAs.
+        if !is_firefox {
+            req = req
+                .header("Sec-Fetch-Dest", "document")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "same-origin")
+                .header("Sec-Fetch-User", "?1");
+        }
+
+        let resp = req
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("AudiobookBay request failed: {e}")))?;
@@ -987,10 +1142,29 @@ mod tests {
 mod live_tests {
     use super::*;
 
+    async fn test_client() -> AbbClient {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("memory db");
+        for stmt in include_str!("../migrations/010_abb_cache.sql").split(';') {
+            let stmt = stmt
+                .lines()
+                .filter(|l| !l.trim().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let stmt = stmt.trim();
+            if stmt.is_empty() {
+                continue;
+            }
+            sqlx::raw_sql(stmt).execute(&pool).await.expect("migrate");
+        }
+        AbbClient::new(pool)
+    }
+
     #[tokio::test]
     #[ignore]
     async fn live_search_matches_abb() {
-        let client = AbbClient::new();
+        let client = test_client().await;
         // Title Case is what users type — must not 301 to homepage.
         let page = client
             .search("Sunrise on the Reaping", 1)
@@ -1017,7 +1191,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore]
     async fn live_search_paginates() {
-        let client = AbbClient::new();
+        let client = test_client().await;
         let p1 = client.search("hunger games", 1).await.expect("p1");
         let p2 = client.search("hunger games", 2).await.expect("p2");
         assert!(!p1.results.is_empty());
@@ -1035,7 +1209,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore]
     async fn live_latest_feed() {
-        let client = AbbClient::new();
+        let client = test_client().await;
         let page = client.latest(1).await.expect("latest");
         assert_eq!(page.mode, "latest");
         assert!(!page.results.is_empty());

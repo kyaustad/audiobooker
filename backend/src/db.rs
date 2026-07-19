@@ -113,6 +113,12 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
         include_str!("../migrations/009_roles_approvals.sql"),
     )
     .await?;
+    run_once(
+        pool,
+        "010_abb_cache",
+        include_str!("../migrations/010_abb_cache.sql"),
+    )
+    .await?;
     ensure_column(pool, "downloads", "library_id", "INTEGER REFERENCES libraries(id)").await?;
     ensure_column(pool, "downloads", "kind", "TEXT NOT NULL DEFAULT 'single'").await?;
     ensure_column(pool, "downloads", "map_files", "INTEGER NOT NULL DEFAULT 0").await?;
