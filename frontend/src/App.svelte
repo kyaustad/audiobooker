@@ -17,6 +17,7 @@
   import MapPack from './pages/MapPack.svelte'
   import Approvals from './pages/Approvals.svelte'
   import CreatedBy from './lib/CreatedBy.svelte'
+  import BottomNavIcon from './lib/BottomNavIcon.svelte'
   import { canApprove, isOperator, isRoot } from './lib/roles'
 
   let loading = $state(true)
@@ -176,34 +177,42 @@
 
     {#if isOperator(user)}
       <nav class="bottom-nav" aria-label="Primary">
-        <a href="#/" class:active={path === '/' || path.startsWith('/match') || path.startsWith('/map')}>
-          <span class="bn-label">Queue</span>
+        <a
+          href="#/"
+          aria-label="Queue"
+          class:active={path === '/' || path.startsWith('/match') || path.startsWith('/map')}
+        >
+          <BottomNavIcon name="queue" />
         </a>
-        <a href="#/browse" class:active={path.startsWith('/browse')}>
-          <span class="bn-label">Discover</span>
+        <a href="#/browse" aria-label="Discover" class:active={path.startsWith('/browse')}>
+          <BottomNavIcon name="discover" />
         </a>
         {#if canApprove(user)}
-          <a href="#/approvals" class:active={path.startsWith('/approvals')}>
-            <span class="bn-label">Approvals</span>
+          <a href="#/approvals" aria-label="Approvals" class:active={path.startsWith('/approvals')}>
+            <BottomNavIcon name="approvals" />
           </a>
         {/if}
-        <a href="#/account" class:active={path.startsWith('/password') || path.startsWith('/account')}>
-          <span class="bn-label">Account</span>
+        <a
+          href="#/account"
+          aria-label="Account"
+          class:active={path.startsWith('/password') || path.startsWith('/account')}
+        >
+          <BottomNavIcon name="account" />
         </a>
       </nav>
     {:else if isRoot(user)}
       <nav class="bottom-nav" aria-label="Primary">
-        <a href="#/approvals" class:active={path.startsWith('/approvals')}>
-          <span class="bn-label">Approvals</span>
+        <a href="#/approvals" aria-label="Approvals" class:active={path.startsWith('/approvals')}>
+          <BottomNavIcon name="approvals" />
         </a>
-        <a href="#/settings" class:active={path === '/settings'}>
-          <span class="bn-label">Settings</span>
+        <a href="#/settings" aria-label="Settings" class:active={path === '/settings'}>
+          <BottomNavIcon name="settings" />
         </a>
-        <a href="#/users" class:active={path === '/users'}>
-          <span class="bn-label">Users</span>
+        <a href="#/users" aria-label="Users" class:active={path === '/users'}>
+          <BottomNavIcon name="users" />
         </a>
-        <a href="#/api-key" class:active={path === '/api-key'}>
-          <span class="bn-label">API</span>
+        <a href="#/api-key" aria-label="API Key" class:active={path === '/api-key'}>
+          <BottomNavIcon name="api" />
         </a>
       </nav>
     {/if}
